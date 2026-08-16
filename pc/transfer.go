@@ -1,0 +1,347 @@
+package main
+
+import (
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+)
+
+const chunkSize = 1 << 20 // 1 MiB
+
+// serveConn handles an inbound connection: exchange hello, then receive files.
+func serveConn(conn net.Conn, reg *DeviceRegistry, selfType string) {
+	defer conn.Close()
+	if tc, ok := conn.(*net.TCPConn); ok {
+		_ = tc.SetReadBuffer(4 << 20)
+		_ = tc.SetWriteBuffer(4 << 20)
+	}
+
+	// Send hello first (both sides write hello before reading).
+	if err := writeFrame(conn, helloHeader(getSelfName(), selfType), nil); err != nil {
+		return
+	}
+	h, _, err := readFrame(conn)
+	if err != nil {
+		return
+	}
+	// 优先用对方 hello 里自报的 IP（跨网卡/热点回环时，remoteIP 可能被 NAT 成本机 IP）
+	peerIP := h.IP
+	if peerIP == "" {
+		peerIP = remoteIP(conn)
+	}
+	// 只跳过明确的回环地址；不再用 isLocalIP 过滤，否则热点回环的手机连接会被误判成本机而丢
+	if ip := net.ParseIP(peerIP); ip == nil || ip.IsLoopback() {
+		receiveLoop(conn, h.DeviceName)
+		return
+	}
+	peer := Device{Name: h.DeviceName, Type: h.DeviceType, IP: peerIP}
+	if h.Port > 0 {
+		peer.Port = h.Port
+	} else {
+		// 兼容不带 port 的旧客户端：默认使用标准端口，而不是对方的临时源端口
+		peer.Port = selfListenPort
+	}
+	reg.add(peer)
+
+	receiveLoop(conn, h.DeviceName)
+}
+
+func remoteIP(conn net.Conn) string {
+	if ta, ok := conn.RemoteAddr().(*net.TCPAddr); ok {
+		return ta.IP.String()
+	}
+	if host, _, err := net.SplitHostPort(conn.RemoteAddr().String()); err == nil {
+		return host
+	}
+	return ""
+}
+
+// TextMsg is a received text/clipboard message.
+type TextMsg struct {
+	From string    `json:"from"`
+	Text string    `json:"text"`
+	Time time.Time `json:"time"`
+}
+
+var (
+	textsMu       sync.Mutex
+	receivedTexts []TextMsg
+)
+
+func addText(from, text string) {
+	textsMu.Lock()
+	defer textsMu.Unlock()
+	receivedTexts = append(receivedTexts, TextMsg{From: from, Text: text, Time: time.Now()})
+	if len(receivedTexts) > 200 {
+		receivedTexts = receivedTexts[len(receivedTexts)-200:]
+	}
+}
+
+func listTexts() []TextMsg {
+	textsMu.Lock()
+	defer textsMu.Unlock()
+	out := make([]TextMsg, len(receivedTexts))
+	copy(out, receivedTexts)
+	return out
+}
+
+// safeRelPath 归一化相对路径，去掉 .. / 绝对路径等危险成分。
+func safeRelPath(p string) string {
+	p = strings.ReplaceAll(p, "\\", "/")
+	var out []string
+	for _, part := range strings.Split(p, "/") {
+		if part == "" || part == "." || part == ".." {
+			continue
+		}
+		out = append(out, part)
+	}
+	return strings.Join(out, "/")
+}
+
+// receiveLoop reads file_meta/file_data/file_end/text frames and writes files.
+func receiveLoop(conn net.Conn, peerName string) {
+	var f *os.File
+	var size, written int64
+	var taskID string
+
+	for {
+		h, payload, err := readFrame(conn)
+		if err != nil {
+			if f != nil {
+				_ = f.Close()
+			}
+			return
+		}
+		switch h.Type {
+		case "text":
+			addText(h.DeviceName, h.Text)
+
+		case "file_meta":
+			if f != nil {
+				_ = f.Close()
+				f = nil
+			}
+			cfg := getConfig()
+			dir := cfg.ReceiveDir
+			if !cfg.AutoSave {
+				dir = filepath.Join(cfg.ReceiveDir, ".pending")
+			}
+			_ = os.MkdirAll(dir, 0o755)
+			name := sanitizeName(h.FileName)
+			if h.RelPath != "" {
+				rel := safeRelPath(h.RelPath)
+				if filepath.Dir(rel) != "." {
+					dir = filepath.Join(dir, filepath.FromSlash(filepath.Dir(rel)))
+					_ = os.MkdirAll(dir, 0o755)
+				}
+				if filepath.Base(rel) != "" {
+					name = sanitizeName(filepath.Base(rel))
+				}
+			}
+			path := uniquePath(filepath.Join(dir, name))
+			nf, err := os.Create(path)
+			if err != nil {
+				_ = writeFrame(conn, Header{Type: "error", Message: err.Error()}, nil)
+				return
+			}
+			f = nf
+			size = h.FileSize
+			written = 0
+			taskID = transfers.create("receive", name, peerName, h.FileSize).ID
+			if err := writeFrame(conn, Header{Type: "ack"}, nil); err != nil {
+				return
+			}
+
+		case "file_data":
+			if f != nil {
+				if _, err := f.Write(payload); err != nil {
+					_ = writeFrame(conn, Header{Type: "error", Message: err.Error()}, nil)
+					return
+				}
+				written += int64(len(payload))
+				transfers.update(taskID, written)
+			}
+
+		case "file_end":
+			if f != nil {
+				_ = f.Close()
+				f = nil
+				if written != size {
+					transfers.finish(taskID, "error", "received size mismatch")
+					_ = writeFrame(conn, Header{Type: "error", Message: "received size mismatch"}, nil)
+					return
+				}
+			}
+			transfers.finish(taskID, "done", "")
+			if err := writeFrame(conn, Header{Type: "ack"}, nil); err != nil {
+				return
+			}
+		}
+	}
+}
+
+// sendItem 表示一个待发送文件（含文件夹内的相对路径）。
+type sendItem struct {
+	path    string
+	relPath string
+	name    string // 原始文件名（为空时回退到 path 的 basename）
+}
+
+// sendBatch 连接目标并发送一批文件（支持文件夹相对路径）。
+// onProgress 每写完一块回调一次，参数为 (累计已发字节, 总字节)。
+func sendBatch(target, selfName, selfType string, items []sendItem, onProgress func(done, total int64)) error {
+	conn, err := net.DialTimeout("tcp", target, 3*time.Second)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	if tc, ok := conn.(*net.TCPConn); ok {
+		_ = tc.SetReadBuffer(4 << 20)
+		_ = tc.SetWriteBuffer(4 << 20)
+	}
+
+	if err := writeFrame(conn, helloHeader(selfName, selfType), nil); err != nil {
+		return err
+	}
+	if _, _, err := readFrame(conn); err != nil {
+		return err
+	}
+
+	var total int64
+	for _, it := range items {
+		if st, err := os.Stat(it.path); err == nil {
+			total += st.Size()
+		}
+	}
+	var done int64
+	for i, it := range items {
+		base := done // 该文件开始前的累计字节；sendOne 回调的是当前文件的累计值，故用 base+n
+		if err := sendOne(conn, it, i, len(items), func(n int64) {
+			if onProgress != nil {
+				onProgress(base+n, total)
+			}
+		}); err != nil {
+			return err
+		}
+		if st, err := os.Stat(it.path); err == nil {
+			done += st.Size()
+		}
+	}
+	return nil
+}
+
+// sendFiles connects to target and sends all files (flat, no folders).
+func sendFiles(target, selfName, selfType string, files []string) error {
+	items := make([]sendItem, len(files))
+	for i, f := range files {
+		items[i] = sendItem{path: f}
+	}
+	return sendBatch(target, selfName, selfType, items, nil)
+}
+
+// sendText 连接目标并发送一条文本/剪贴板消息。
+func sendText(target, selfName, selfType, text string) error {
+	conn, err := net.DialTimeout("tcp", target, 3*time.Second)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	if err := writeFrame(conn, helloHeader(selfName, selfType), nil); err != nil {
+		return err
+	}
+	if _, _, err := readFrame(conn); err != nil {
+		return err
+	}
+	return writeFrame(conn, Header{Type: "text", Text: text, DeviceName: selfName}, nil)
+}
+
+func sendOne(conn net.Conn, it sendItem, fi, total int, onProgress func(int64)) error {
+	f, err := os.Open(it.path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	name := it.name
+	if name == "" {
+		name = filepath.Base(it.path)
+	}
+	fileID := strconv.Itoa(fi)
+
+	meta := Header{Type: "file_meta", FileID: fileID, FileName: name, FileSize: st.Size(), FileIndex: fi, FileCount: total, RelPath: it.relPath}
+	if err := writeFrame(conn, meta, nil); err != nil {
+		return err
+	}
+	if h, _, err := readFrame(conn); err != nil {
+		return err
+	} else if h.Type == "error" {
+		return errors.New(h.Message)
+	}
+
+	buf := make([]byte, chunkSize)
+	var idx int64
+	var sent int64
+	for {
+		n, rerr := f.Read(buf)
+		if n > 0 {
+			if err := writeFrame(conn, Header{Type: "file_data", FileID: fileID, ChunkIndex: idx}, buf[:n]); err != nil {
+				return err
+			}
+			idx++
+			sent += int64(n)
+			if onProgress != nil {
+				onProgress(sent)
+			}
+		}
+		if rerr == io.EOF {
+			break
+		}
+		if rerr != nil {
+			return rerr
+		}
+	}
+
+	if err := writeFrame(conn, Header{Type: "file_end", FileID: fileID, TotalBytes: st.Size()}, nil); err != nil {
+		return err
+	}
+	if h, _, err := readFrame(conn); err != nil {
+		return err
+	} else if h.Type == "error" {
+		return errors.New(h.Message)
+	}
+	return nil
+}
+
+func sanitizeName(name string) string {
+	name = filepath.Base(name)
+	name = strings.ReplaceAll(name, "\\", "")
+	name = strings.ReplaceAll(name, "/", "")
+	if name == "" || name == "." || name == ".." {
+		return "unnamed"
+	}
+	return name
+}
+
+func uniquePath(path string) string {
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return path
+	}
+	ext := filepath.Ext(path)
+	base := strings.TrimSuffix(path, ext)
+	for i := 1; ; i++ {
+		p := fmt.Sprintf("%s (%d)%s", base, i, ext)
+		if _, err := os.Stat(p); os.IsNotExist(err) {
+			return p
+		}
+	}
+}

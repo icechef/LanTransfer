@@ -1,0 +1,24 @@
+# 编译产物
+*.exe
+*.exe~
+*.apk
+
+# Android / Gradle 构建缓存
+android/.gradle/
+android/app/build/
+android/build/
+android/.android-home/
+android/local.properties
+
+# 测试临时目录
+.testdata/
+
+# 系统 / 编辑器
+.DS_Store
+Thumbs.db
+.idea/
+*.iml
+*~
+
+# 输出目录
+dist/

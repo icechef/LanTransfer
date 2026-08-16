@@ -1,0 +1,798 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>局域网传输</title>
+<style>
+  :root { --bg:#f5f6f8; --card:#ffffff; --fg:#1a1d21; --muted:#6b7280; --accent:#2563eb; --border:#e5e7eb; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; background:var(--bg); color:var(--fg); }
+  .wrap { max-width:640px; margin:0 auto; padding:16px; padding-bottom:40px; }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:16px; margin-bottom:14px; }
+  h1 { font-size:20px; margin:0 0 4px; }
+  h2 { font-size:15px; margin:0 0 12px; color:var(--muted); font-weight:600; }
+  .row { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+  .qr { width:140px; height:140px; background:#fff; border:1px solid var(--border); border-radius:8px; }
+  .meta { font-size:14px; line-height:1.7; color:var(--muted); word-break:break-all; }
+  .meta b { color:var(--fg); }
+  /* 按钮统一描边样式 */
+  button { background:#fff; color:var(--accent); border:1px solid var(--accent); border-radius:8px; padding:8px 14px; font-size:14px; cursor:pointer; transition:background .15s, color .15s; }
+  button:hover { background:rgba(37,99,235,.08); }
+  button.ghost { background:#fff; color:var(--accent); border:1px solid var(--accent); }
+  button.small { padding:4px 10px; font-size:12px; }
+  button.danger { background:#fff; color:#dc2626; border:1px solid #dc2626; }
+  button.danger:hover { background:rgba(220,38,38,.08); }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  .dev { display:flex; align-items:center; justify-content:space-between; padding:10px 0; border-bottom:1px solid var(--border); }
+  .dev:last-child { border-bottom:none; }
+  .dev .n { font-weight:600; }
+  .dev .t { color:var(--muted); font-size:12px; }
+  .file { display:flex; align-items:center; justify-content:space-between; padding:8px 0; border-bottom:1px solid var(--border); font-size:14px; gap:8px; }
+  .file:last-child { border-bottom:none; }
+  .file a { color:var(--accent); text-decoration:none; flex:1; word-break:break-all; }
+  .file .s { color:var(--muted); font-size:12px; }
+  .file .del { background:#fff; color:#dc2626; border:1px solid #dc2626; padding:3px 10px; font-size:12px; border-radius:6px; cursor:pointer; }
+  .empty { color:var(--muted); font-size:13px; padding:8px 0; }
+  .hint { font-size:12px; color:var(--muted); margin-top:8px; }
+  .toast { position:fixed; bottom:20px; left:50%; transform:translateX(-50%); background:#111827; color:#fff; padding:10px 16px; border-radius:8px; font-size:14px; opacity:0; transition:opacity .2s; pointer-events:none; z-index:99; }
+  .toast.show { opacity:1; }
+  .modal-mask { position:fixed; inset:0; background:rgba(0,0,0,.4); display:none; align-items:center; justify-content:center; z-index:50; }
+  .modal-mask.show { display:flex; }
+  .modal { background:#fff; border-radius:12px; padding:18px; width:90%; max-width:420px; max-height:80vh; overflow:auto; }
+  .modal h3 { margin:0 0 12px; font-size:16px; }
+  .modal .btns { display:flex; gap:10px; justify-content:flex-end; margin-top:14px; }
+  .chk { color:var(--accent); text-decoration:none; font-size:13px; cursor:pointer; }
+  a.dlbtn { display:inline-block; background:#fff; color:var(--accent); border:1px solid var(--accent); border-radius:8px; padding:8px 14px; text-decoration:none; font-size:14px; }
+  /* 设备选择：整块可点击、hover 高亮、选中高亮 */
+  .pick { position:relative; padding:12px 40px 12px 12px; border:1px solid var(--border); border-radius:8px; margin-bottom:8px; cursor:pointer; transition:border-color .15s, background .15s; }
+  .pick:hover { border-color:var(--accent); background:rgba(37,99,235,.05); }
+  .pick.selected { border-color:var(--accent); background:rgba(37,99,235,.10); }
+  .pick .pn { font-weight:600; font-size:14px; }
+  .pick .pt { color:var(--muted); font-size:12px; margin-top:2px; }
+  .pick::after { content:'✓'; position:absolute; right:12px; top:50%; transform:translateY(-50%); width:20px; height:20px; line-height:20px; text-align:center; border:1.5px solid var(--border); border-radius:50%; color:transparent; font-size:12px; transition:all .15s; }
+  .pick.selected::after { border-color:var(--accent); background:var(--accent); color:#fff; }
+  /* 传输进度条 */
+  .prog { margin-bottom:12px; }
+  .prog:last-child { margin-bottom:0; }
+  .prog .ph { display:flex; justify-content:space-between; font-size:13px; margin-bottom:4px; color:var(--fg); }
+  .prog .ph .sub { color:var(--muted); font-size:12px; }
+  .bar { height:8px; background:var(--border); border-radius:4px; overflow:hidden; }
+  .bar .fill { height:100%; background:var(--accent); width:0; transition:width .3s; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="card">
+    <div class="row" style="justify-content:space-between;">
+      <h1 id="devName" style="margin:0;">网页设备</h1>
+      <button id="renameBtn" class="small">改名</button>
+    </div>
+    <div class="row" style="margin-top:8px;">
+      <img id="qr" class="qr" alt="二维码">
+      <div class="meta" id="meta">加载中…</div>
+    </div>
+    <div class="hint">改名为你的设备名后，其他网页设备就能在「发现设备」里看到你并互传。装了 App 的设备也会自动出现。</div>
+  </div>
+
+  <div class="card">
+    <h2>发现设备</h2>
+    <div id="devices"></div>
+  </div>
+
+  <div class="card" id="progressCard" style="display:none;">
+    <h2>传输进度</h2>
+    <div id="progressList"></div>
+  </div>
+
+  <div class="card">
+    <h2>发送</h2>
+    <div class="grid">
+      <button id="sendFileBtn">发送文件</button>
+      <button id="sendFolderBtn">发送文件夹</button>
+      <button id="sendTextBtn">发送文本</button>
+      <button id="sendClipBtn">发送剪贴板</button>
+    </div>
+    <div class="hint">先选内容，再选择要发送到的设备（可多选）。</div>
+  </div>
+
+  <div class="card">
+    <h2>上传暂存文件</h2>
+    <div class="row">
+      <button id="addFileBtn" class="ghost">添加文件</button>
+      <button id="addFolderBtn" class="ghost">添加文件夹</button>
+      <button id="addTextBtn" class="ghost">添加文本</button>
+      <button id="addPathBtn" class="ghost">上传路径</button>
+    </div>
+    <div id="pendingList" style="margin-top:10px;"></div>
+    <div class="row" style="margin-top:10px;">
+      <button id="uploadEachBtn">逐个文件发送</button>
+      <button id="uploadBtn" style="flex:1;">上传（打成一个包）</button>
+    </div>
+    <div class="hint">可多次添加。「逐个文件发送」每个单独落盘；「打成一个包」多个合并为 zip（单个则不打包）。对方在「本机文件」点一下即可下载。</div>
+  </div>
+
+  <div class="card">
+    <div class="row" style="justify-content:space-between;">
+      <h2 style="margin:0;">暂存文件</h2>
+      <button id="clearStagedBtn" class="danger small">清空</button>
+    </div>
+    <div id="staged"></div>
+  </div>
+
+  <div class="card">
+    <h2>收到的文本</h2>
+    <div id="texts"></div>
+  </div>
+
+  <div class="card">
+    <h2>历史记录</h2>
+    <div class="empty">即将上线，敬请期待。</div>
+  </div>
+
+  <div class="card">
+    <h2>设置</h2>
+    <div class="row" style="margin-bottom:10px;">
+      <span style="font-size:13px;color:var(--muted);">接收目录</span>
+      <input id="dirInput" type="text" style="flex:1;border:1px solid var(--border);border-radius:8px;padding:6px 8px;font-size:13px;">
+    </div>
+    <div class="row" style="margin-bottom:10px;">
+      <span style="font-size:13px;color:var(--muted);">缓存目录</span>
+      <input id="cacheInput" type="text" style="flex:1;border:1px solid var(--border);border-radius:8px;padding:6px 8px;font-size:13px;">
+    </div>
+    <label style="font-size:13px;display:flex;align-items:center;gap:6px;margin-bottom:10px;">
+      <input type="checkbox" id="autoSaveChk"> 自动保存到接收目录
+    </label>
+    <button id="saveSettingsBtn" class="small">保存设置</button>
+  </div>
+
+  <div class="card">
+    <h2>共享文件夹（手机可浏览/上传）</h2>
+    <div class="row" style="margin-bottom:8px;">
+      <input id="sharePathInput" type="text" placeholder="文件夹绝对路径，如 D:\docs" style="flex:1;border:1px solid var(--border);border-radius:8px;padding:6px 8px;font-size:13px;">
+    </div>
+    <div class="row" style="margin-bottom:8px;">
+      <input id="shareNameInput" type="text" placeholder="显示名（可选，默认文件夹名）" style="flex:1;border:1px solid var(--border);border-radius:8px;padding:6px 8px;font-size:13px;">
+    </div>
+    <label style="font-size:13px;display:flex;align-items:center;gap:6px;margin-bottom:8px;">
+      <input type="checkbox" id="shareReadonlyChk"> 只读（不允许手机上传）
+    </label>
+    <button id="addShareBtn" class="small">添加共享</button>
+    <div id="shareList" style="margin-top:10px;"></div>
+    <div class="hint">手机端「电脑文件」里能看到这些文件夹并浏览子目录、下载文件；非只读目录可上传。</div>
+  </div>
+</div>
+
+<input type="file" id="fileInput" multiple style="display:none;">
+<input type="file" id="folderInput" webkitdirectory style="display:none;">
+<input type="file" id="devSendFile" multiple style="display:none;">
+
+<div class="modal-mask" id="devModal">
+  <div class="modal">
+    <h3>选择发送到的设备（可多选）</h3>
+    <div id="devModalList"></div>
+    <div class="row" style="margin-top:10px; justify-content:space-between;">
+      <a class="chk" id="selectAll">全选</a>
+      <a class="chk" id="selectNone">清空</a>
+    </div>
+    <div class="btns">
+      <button class="ghost" id="devCancel">取消</button>
+      <button id="devConfirm">发送</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-mask" id="textModal">
+  <div class="modal">
+    <h3 id="textModalTitle">输入文本</h3>
+    <textarea id="textArea" rows="5" placeholder="输入要发送的文本" style="width:100%;border:1px solid var(--border);border-radius:8px;padding:8px;font-size:14px;font-family:inherit;"></textarea>
+    <div class="btns">
+      <button class="ghost" id="textCancel">取消</button>
+      <button id="textConfirm">确定</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-mask" id="pasteModal">
+  <div class="modal">
+    <h3>粘贴剪贴板内容</h3>
+    <div class="hint" style="margin:0 0 8px;">浏览器限制了自动读取剪贴板，请在下方输入框按 Ctrl+V（或长按粘贴），再点「确定发送」。</div>
+    <textarea id="pasteArea" rows="5" placeholder="在此粘贴内容" style="width:100%;border:1px solid var(--border);border-radius:8px;padding:8px;font-size:14px;font-family:inherit;"></textarea>
+    <div class="btns">
+      <button class="ghost" id="pasteCancel">取消</button>
+      <button id="pasteConfirm">确定发送</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+
+let currentSend = null;   // {kind:'files'|'text', files:[{name,file,rel}], text:''}
+let pendingUpload = [];   // {kind:'file', file:File, rel:string} | {kind:'text', text:string}
+let inputMode = null;     // 'send' | 'upload'
+let seenFiles = {};       // name -> mtime
+let seenFilesInit = false;
+let lastTextCount = 0;
+let textInit = false;
+let mySid = localStorage.getItem('sid') || '';
+let myName = localStorage.getItem('myname') || '';
+let uploadPct = null;   // 非 null 表示正在上传到服务器（0-100）
+let activeTasks = {};   // taskId -> true（用于检测任务完成）
+
+function renderSelf() {
+  $('devName').textContent = myName || '网页设备';
+}
+async function initSession() {
+  try {
+    const params = new URLSearchParams();
+    if (mySid) params.set('sid', mySid);
+    if (myName) params.set('name', myName);
+    const r = await fetch('/api/session?' + params.toString());
+    const d = await r.json();
+    mySid = d.sid; myName = d.name;
+    localStorage.setItem('sid', mySid);
+    localStorage.setItem('myname', myName);
+    renderSelf();
+  } catch(e) {}
+}
+
+function toast(msg) {
+  const t = $('toast'); t.textContent = msg; t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 2600);
+}
+function fmtSize(n) {
+  if (n >= 1<<30) return (n/(1<<30)).toFixed(1)+' GB';
+  if (n >= 1<<20) return (n/(1<<20)).toFixed(1)+' MB';
+  if (n >= 1<<10) return (n/(1<<10)).toFixed(1)+' KB';
+  return n+' B';
+}
+function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+let lastReceiveDir = '';
+async function loadInfo() {
+  try {
+    const r = await fetch('/api/info'); const d = await r.json();
+    // 接收目录变了 → 重置 seenFiles，避免把新目录里的既有文件误判为「新收到」
+    if (lastReceiveDir && d.receiveDir !== lastReceiveDir) {
+      seenFilesInit = false; seenFiles = {};
+    }
+    lastReceiveDir = d.receiveDir;
+    let html = '接收目录：<b>'+d.receiveDir+'</b><br>';
+    if (d.lanURL) html += '局域网地址：<b>'+d.lanURL+'</b>';
+    $('meta').innerHTML = html;
+    if (d.qr) $('qr').src = d.qr; else $('qr').style.display = 'none';
+  } catch(e) {}
+}
+
+function deviceAddr(d) {
+  return d.kind === 'web' ? ('web:' + d.sid) : (d.ip + ':' + (d.port || 53318));
+}
+function deviceSub(d) {
+  return d.kind === 'web' ? d.ip : deviceAddr(d);
+}
+
+async function loadDevices() {
+  try {
+    const r = await fetch('/api/devices?sid='+encodeURIComponent(mySid)); const list = await r.json();
+    const box = $('devices');
+    if (!list.length) { box.innerHTML = '<div class="empty">暂无设备。让手机打开 App 或扫码打开网页并改名，设备会自动出现在这里。</div>'; return; }
+    box.innerHTML = list.map(d => {
+      const addr = deviceAddr(d);
+      const typeLabel = d.kind === 'web' ? '网页' : d.type;
+      return '<div class="dev"><div><div class="n">'+escapeHtml(d.name)+'</div><div class="t">'+escapeHtml(typeLabel)+' · '+escapeHtml(deviceSub(d))+'</div></div>' +
+             '<button class="small" data-addr="'+escapeHtml(addr)+'">发送文件</button></div>';
+    }).join('');
+    box.querySelectorAll('button[data-addr]').forEach(b => {
+      b.onclick = () => { currentSend = {kind:'files', files:[], singleTarget:b.dataset.addr}; $('devSendFile').click(); };
+    });
+  } catch(e) {}
+}
+
+async function loadFiles() {
+  try {
+    const r = await fetch('/api/files'); const list = await r.json();
+    if (!seenFilesInit) {
+      list.forEach(f => { seenFiles[f.name] = f.mtime; });
+      seenFilesInit = true;
+    } else {
+      const now = {};
+      list.forEach(f => { now[f.name] = f.mtime; });
+      for (const name in now) {
+        if (seenFiles[name] === undefined) {
+          const it = list.find(x => x.name === name);
+          showReceiveDialog('收到文件', '<b>'+escapeHtml(name)+'</b>（'+fmtSize(it ? it.size : 0)+'）', '/api/download/'+encodeURIComponent(name));
+        }
+      }
+      seenFiles = now;
+    }
+  } catch(e) {}
+}
+
+async function loadStaged() {
+  try {
+    const r = await fetch('/api/staged'); const list = await r.json();
+    renderFileList($('staged'), list, 'staged');
+  } catch(e) {}
+}
+
+// renderFileList 渲染文件列表；reload 决定删除后刷新哪个列表。
+function renderFileList(box, list, reload) {
+  if (!list.length) { box.innerHTML = '<div class="empty">暂无文件。</div>'; return; }
+  box.innerHTML = list.map(f => {
+    let dl, delUrl;
+    if (f.source === 'share') {
+      dl = '/api/download/'+encodeURIComponent(f.name)+'?path='+encodeURIComponent(f.path);
+      delUrl = '/api/delete?path='+encodeURIComponent(f.path);
+    } else if (f.source === 'upload') {
+      dl = '/api/download/'+encodeURIComponent(f.name)+'?src=upload';
+      delUrl = '/api/delete?name='+encodeURIComponent(f.name)+'&src=upload';
+    } else {
+      dl = '/api/download/'+encodeURIComponent(f.name);
+      delUrl = '/api/delete?name='+encodeURIComponent(f.name);
+    }
+    const tag = f.source === 'share' ? '<span class="s" style="color:#16a34a;">路径</span>' : '';
+    return '<div class="file"><a href="'+dl+'">'+escapeHtml(f.name)+'</a>'+tag+'<span class="s">'+fmtSize(f.size)+'</span>' +
+      '<button class="del" data-url="'+escapeHtml(delUrl)+'" data-reload="'+reload+'">删除</button></div>';
+  }).join('');
+  box.querySelectorAll('button.del').forEach(b => {
+    b.onclick = async () => {
+      await fetch(b.dataset.url, { method:'POST' });
+      if (b.dataset.reload === 'staged') loadStaged(); else loadFiles();
+    };
+  });
+}
+
+async function loadTexts() {
+  try {
+    const r = await fetch('/api/texts'); const list = await r.json();
+    const box = $('texts');
+    if (textInit && list.length > lastTextCount) {
+      const latest = list[0];
+      showReceiveDialog('收到来自 ' + escapeHtml(latest.from) + ' 的文本', escapeHtml(latest.text), null);
+    }
+    lastTextCount = list.length;
+    textInit = true;
+    if (!list.length) { box.innerHTML = '<div class="empty">暂无文本。</div>'; return; }
+    box.innerHTML = list.map(t =>
+      '<div class="file"><div style="flex:1;"><b>'+escapeHtml(t.from)+'</b><br>'+escapeHtml(t.text)+'</div>' +
+      '<button class="del" data-text="'+escapeHtml(t.text)+'">复制</button></div>'
+    ).join('');
+    box.querySelectorAll('button[data-text]').forEach(b => {
+      b.onclick = () => { copyText(b.dataset.text); };
+    });
+  } catch(e) {}
+}
+
+async function loadInbox() {
+  if (!mySid) return;
+  try {
+    const r = await fetch('/api/inbox?sid='+encodeURIComponent(mySid));
+    const list = await r.json();
+    list.forEach(m => {
+      if (m.kind === 'text') {
+        showReceiveDialog('收到来自 ' + escapeHtml(m.from) + ' 的文本', escapeHtml(m.text), null);
+      } else if (m.kind === 'file') {
+        showReceiveDialog('收到来自 ' + escapeHtml(m.from) + ' 的文件',
+          '<b>'+escapeHtml(m.fileName)+'</b>（'+fmtSize(m.size||0)+'）',
+          '/api/download/'+encodeURIComponent(m.fileName)+'?src=upload');
+      }
+    });
+  } catch(e) {}
+}
+
+// ---- 改设备名 ----
+$('renameBtn').onclick = () => {
+  openTextModal('设置设备名', async (name) => {
+    try {
+      const r = await fetch('/api/webname', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ sid: mySid, name }) });
+      const d = await r.json();
+      if (d.ok) { myName = d.name; localStorage.setItem('myname', myName); renderSelf(); }
+      // 同时改电脑（TCP）设备名：手机扫描 PC 时显示这个名字，而不是主机名
+      try { await fetch('/api/name', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ name }) }); } catch(e) {}
+      toast('已改名为 ' + name);
+    } catch(e) { toast('改名失败'); }
+  });
+};
+
+function showReceiveDialog(title, body, downloadUrl) {
+  const mask = document.createElement('div');
+  mask.className = 'modal-mask show';
+  mask.innerHTML = '<div class="modal"><h3>'+title+'</h3><div style="word-break:break-all;max-height:200px;overflow:auto;">'+body+'</div>' +
+    '<div class="btns">' +
+    (downloadUrl ? '<a class="dlbtn" href="'+downloadUrl+'">下载</a>' : '') +
+    '<button class="ghost" id="rxClose">关闭</button></div></div>';
+  document.body.appendChild(mask);
+  mask.querySelector('#rxClose').onclick = () => mask.remove();
+  const dl = mask.querySelector('a.dlbtn');
+  if (dl) dl.onclick = () => mask.remove();
+}
+
+// ---- 剪贴板：读取与写入（非安全上下文降级为手动粘贴 / execCommand）----
+function copyText(text) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(() => toast('已复制')).catch(() => fallbackCopy(text));
+  } else {
+    fallbackCopy(text);
+  }
+}
+function fallbackCopy(text) {
+  const ta = document.createElement('textarea');
+  ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+  document.body.appendChild(ta); ta.select();
+  try { document.execCommand('copy'); toast('已复制'); } catch(e) { toast('复制失败，请手动复制'); }
+  document.body.removeChild(ta);
+}
+function openPasteModal() {
+  $('pasteArea').value = '';
+  $('pasteModal').classList.add('show');
+  setTimeout(() => $('pasteArea').focus(), 50);
+}
+
+// ---- 发送按钮 ----
+$('sendFileBtn').onclick = () => { inputMode = 'send'; $('fileInput').click(); };
+$('sendFolderBtn').onclick = () => { inputMode = 'send'; $('folderInput').click(); };
+$('sendTextBtn').onclick = () => { openTextModal('发送文本', t => { currentSend = {kind:'text', text:t}; openDeviceModal(); }); };
+$('sendClipBtn').onclick = async () => {
+  try {
+    if (navigator.clipboard && navigator.clipboard.readText) {
+      const t = await navigator.clipboard.readText();
+      if (t) { currentSend = {kind:'text', text:t}; openDeviceModal(); }
+      else { toast('剪贴板为空'); }
+      return;
+    }
+    openPasteModal();
+  } catch(e) { openPasteModal(); }
+};
+
+// ---- 上传按钮 ----
+$('addFileBtn').onclick = () => { inputMode = 'upload'; $('fileInput').click(); };
+$('addFolderBtn').onclick = () => { inputMode = 'upload'; $('folderInput').click(); };
+$('addTextBtn').onclick = () => { openTextModal('添加文本', t => { pendingUpload.push({kind:'text', text:t}); renderPending(); }); };
+
+// ---- 文件/文件夹选择（根据 inputMode 分流） ----
+$('fileInput').onchange = () => {
+  const fs = Array.from($('fileInput').files).map(f => ({name:f.name, file:f, rel:''}));
+  $('fileInput').value = '';
+  if (inputMode === 'upload') { fs.forEach(x => pendingUpload.push({kind:'file', file:x.file, rel:x.rel})); renderPending(); }
+  else if (fs.length) { currentSend = {kind:'files', files:fs}; openDeviceModal(); }
+  inputMode = null;
+};
+$('folderInput').onchange = () => {
+  const fs = Array.from($('folderInput').files).map(f => ({name:f.name, file:f, rel:(f.webkitRelativePath || f.name)}));
+  $('folderInput').value = '';
+  if (inputMode === 'upload') { fs.forEach(x => pendingUpload.push({kind:'file', file:x.file, rel:x.rel})); renderPending(); }
+  else if (fs.length) { currentSend = {kind:'files', files:fs}; openDeviceModal(); }
+  inputMode = null;
+};
+$('devSendFile').onchange = () => {
+  const target = currentSend && currentSend.singleTarget;
+  const files = Array.from($('devSendFile').files).map(f => ({name:f.name, file:f, rel:''}));
+  $('devSendFile').value = '';
+  if (target && files.length) { sendFilesTo([target], files); currentSend = null; }
+};
+
+// ---- 设备多选弹窗 ----
+function openDeviceModal() {
+  fetch('/api/devices?sid='+encodeURIComponent(mySid)).then(r=>r.json()).then(list => {
+    const box = $('devModalList');
+    if (!list.length) { toast('没有可发送的设备'); currentSend = null; return; }
+    box.innerHTML = list.map(d =>
+      '<div class="pick" data-addr="'+escapeHtml(deviceAddr(d))+'">' +
+        '<div class="pn">'+escapeHtml(d.name)+'</div>' +
+        '<div class="pt">'+escapeHtml(d.kind === 'web' ? '网页' : d.type)+' · '+escapeHtml(deviceSub(d))+'</div>' +
+      '</div>'
+    ).join('');
+    box.querySelectorAll('.pick').forEach(el => {
+      el.onclick = () => el.classList.toggle('selected');
+    });
+    $('devModal').classList.add('show');
+  });
+}
+$('selectAll').onclick = () => document.querySelectorAll('#devModalList .pick').forEach(c => c.classList.add('selected'));
+$('selectNone').onclick = () => document.querySelectorAll('#devModalList .pick').forEach(c => c.classList.remove('selected'));
+$('devCancel').onclick = () => { $('devModal').classList.remove('show'); currentSend = null; };
+$('devConfirm').onclick = () => {
+  const targets = Array.from(document.querySelectorAll('#devModalList .pick.selected')).map(c => c.dataset.addr);
+  if (!targets.length) { toast('请至少选择一台设备'); return; }
+  $('devModal').classList.remove('show');
+  const cs = currentSend;
+  currentSend = null;
+  if (cs.kind === 'text') sendTextTo(targets, cs.text); else sendFilesTo(targets, cs.files);
+};
+
+function progHtml(label, sub, pct) {
+  return '<div class="prog"><div class="ph"><span>'+escapeHtml(label)+'</span><span class="sub">'+(sub?escapeHtml(sub)+' · ':'')+pct+'%</span></div>' +
+    '<div class="bar"><div class="fill" style="width:'+pct+'%"></div></div></div>';
+}
+function renderProgress(runningTasks) {
+  let html = '';
+  if (uploadPct !== null) html += progHtml('上传到服务器', '', uploadPct);
+  runningTasks.forEach(t => {
+    const pct = t.size > 0 ? Math.round(t.done/t.size*100) : 0;
+    const dir = t.dir === 'send' ? '发送' : '接收';
+    html += progHtml(dir+' '+t.name, t.peer, pct);
+  });
+  if (html) { $('progressCard').style.display = ''; $('progressList').innerHTML = html; }
+  else $('progressCard').style.display = 'none';
+}
+async function loadTransfers() {
+  try {
+    const r = await fetch('/api/transfers'); const list = await r.json();
+    const running = list.filter(t => t.status === 'running');
+    list.forEach(t => {
+      if (activeTasks[t.id] && t.status !== 'running') {
+        if (t.status === 'done') toast((t.dir==='send'?'发送':'接收')+'完成：'+t.name);
+        else if (t.status === 'error') toast((t.dir==='send'?'发送':'接收')+'失败：'+t.name);
+      }
+    });
+    const na = {}; running.forEach(t => { na[t.id] = true; });
+    activeTasks = na;
+    renderProgress(running);
+  } catch(e) {}
+}
+
+async function sendFilesTo(targets, files) {
+  if (!files.length) { toast('没有文件'); return; }
+  const fd = new FormData();
+  fd.append('targets', targets.join(','));
+  fd.append('fromSid', mySid);
+  files.forEach(f => { fd.append('files', f.file, f.name); fd.append('relpaths', f.rel); });
+
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', '/api/send');
+  xhr.upload.onprogress = (e) => {
+    if (e.lengthComputable) { uploadPct = Math.round(e.loaded/e.total*100); renderProgress([]); }
+  };
+  xhr.onload = () => {
+    uploadPct = null;
+    let d = {};
+    try { d = JSON.parse(xhr.responseText); } catch(e) {}
+    if (d.ok) {
+      if (d.tasks && d.tasks.length) {
+        d.tasks.forEach(id => { activeTasks[id] = true; });
+        toast('已开始发送');
+      } else if (d.webSent) {
+        toast('已发送给 '+d.webSent+' 个网页设备');
+      }
+    } else {
+      toast('发送失败：'+(d.error||''));
+    }
+    loadTransfers();
+  };
+  xhr.onerror = () => { uploadPct = null; renderProgress([]); toast('发送失败（网络错误）'); };
+  xhr.send(fd);
+}
+async function sendTextTo(targets, text) {
+  const r = await fetch('/api/sendtext', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ targets, text, fromSid: mySid })
+  });
+  const d = await r.json();
+  if (d.ok) toast('文本已发送到 '+d.sent+' 台设备'); else toast('发送失败：'+(d.error||''));
+}
+
+// ---- 文本弹窗 ----
+function openTextModal(title, onOk, placeholder) {
+  $('textModalTitle').textContent = title;
+  $('textArea').value = '';
+  $('textArea').placeholder = placeholder || '输入要发送的文本';
+  $('textModal').classList.add('show');
+  $('textConfirm').onclick = () => {
+    const v = $('textArea').value.trim();
+    if (!v) { toast('请输入内容'); return; }
+    $('textModal').classList.remove('show');
+    onOk(v);
+  };
+}
+$('textCancel').onclick = () => $('textModal').classList.remove('show');
+
+// ---- 上传路径（只记录路径不复制）----
+$('addPathBtn').onclick = () => {
+  openTextModal('添加本机路径', async (path) => {
+    try {
+      const r = await fetch('/api/share', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ path }) });
+      const d = await r.json();
+      if (d.ok) { toast('已共享：'+d.name); loadStaged(); }
+      else toast('添加失败：'+(d.error||''));
+    } catch(e) { toast('添加失败'); }
+  }, '输入服务器本地文件路径，如 D:\\电影\\x.mp4');
+};
+
+// ---- 粘贴弹窗 ----
+$('pasteCancel').onclick = () => $('pasteModal').classList.remove('show');
+$('pasteConfirm').onclick = () => {
+  const v = $('pasteArea').value;
+  $('pasteModal').classList.remove('show');
+  if (!v.trim()) { toast('内容为空'); return; }
+  currentSend = {kind:'text', text:v};
+  openDeviceModal();
+};
+
+// ---- 待上传列表 ----
+function renderPending() {
+  const box = $('pendingList');
+  if (!pendingUpload.length) { box.innerHTML = '<div class="empty">尚未添加任何文件/文本。</div>'; return; }
+  box.innerHTML = pendingUpload.map((p,i) =>
+    '<div class="file"><span>'+escapeHtml(p.kind==='text' ? ('[文本] '+p.text.slice(0,40)) : (p.rel || p.file.name))+'</span>' +
+    '<button class="del" data-i="'+i+'">移除</button></div>'
+  ).join('');
+  box.querySelectorAll('button[data-i]').forEach(b => {
+    b.onclick = () => { pendingUpload.splice(+b.dataset.i, 1); renderPending(); };
+  });
+}
+$('uploadBtn').onclick = async () => {
+  if (!pendingUpload.length) { toast('请先添加文件/文本'); return; }
+  const fd = new FormData();
+  const texts = [];
+  pendingUpload.forEach(p => {
+    if (p.kind === 'text') texts.push(p.text);
+    else { fd.append('files', p.file, p.file.name); fd.append('relpaths', p.rel); }
+  });
+  if (texts.length) fd.append('texts', JSON.stringify(texts));
+  toast('上传中…');
+  const r = await fetch('/api/upload', { method:'POST', body:fd });
+  const d = await r.json();
+  if (d.ok) { toast('已暂存 '+d.count+' 项'+(d.name ? '：'+d.name : '')); pendingUpload = []; renderPending(); loadStaged(); }
+  else toast('上传失败：'+(d.error||''));
+};
+$('uploadEachBtn').onclick = async () => {
+  if (!pendingUpload.length) { toast('请先添加文件/文本'); return; }
+  toast('逐个上传中…');
+  let ok = 0;
+  for (const p of pendingUpload) {
+    const fd = new FormData();
+    if (p.kind === 'text') fd.append('texts', JSON.stringify([p.text]));
+    else { fd.append('files', p.file, p.file.name); fd.append('relpaths', p.rel); }
+    try {
+      const r = await fetch('/api/upload', { method:'POST', body:fd });
+      const d = await r.json();
+      if (d.ok) ok++;
+    } catch(e) {}
+  }
+  pendingUpload = []; renderPending(); loadStaged();
+  toast('已上传 '+ok+' 项');
+};
+
+$('clearStagedBtn').onclick = async () => {
+  let count = 0;
+  try { const r = await fetch('/api/staged'); const l = await r.json(); count = l.length; } catch(e) {}
+  if (!confirm('确定清空缓存目录下的全部文件（共 '+count+' 个）？此操作不可撤销。')) return;
+  const r = await fetch('/api/clear?src=upload', { method:'POST' });
+  const d = await r.json();
+  if (d.ok) { toast('已清空 '+d.deleted+' 个文件'); loadStaged(); }
+  else toast('清空失败：'+(d.error||''));
+};
+
+// ---- 设置 ----
+async function loadSettings() {
+  try {
+    const r = await fetch('/api/settings'); const d = await r.json();
+    $('dirInput').value = d.receiveDir || '';
+    $('cacheInput').value = d.cacheDir || '';
+    $('autoSaveChk').checked = d.autoSave !== false;
+  } catch(e) {}
+}
+$('saveSettingsBtn').onclick = async () => {
+  const receiveDir = $('dirInput').value.trim();
+  const cacheDir = $('cacheInput').value.trim();
+  const autoSave = $('autoSaveChk').checked;
+  try {
+    const r = await fetch('/api/settings', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ receiveDir, cacheDir, autoSave }) });
+    const d = await r.json();
+    if (d.ok) { toast('设置已保存'); loadInfo(); }
+    else toast('保存失败：'+(d.error||''));
+  } catch(e) { toast('保存失败'); }
+};
+
+// ---- 共享文件夹 ----
+async function loadShares() {
+  try {
+    const r = await fetch('/api/folders'); const list = await r.json();
+    const box = $('shareList');
+    const folders = list.filter(f => f.kind === 'folder');
+    if (!folders.length) { box.innerHTML = '<div class="empty">尚未共享文件夹</div>'; return; }
+    box.innerHTML = folders.map(f =>
+      '<div class="row" style="justify-content:space-between;padding:4px 0;">' +
+      '<span style="font-size:13px;">'+escapeHtml(f.name)+' <span style="color:var(--muted)">'+escapeHtml(f.path)+(f.readonly?'（只读）':'')+'</span></span>' +
+      '<button class="small danger" data-path="'+escapeHtml(f.path)+'">删除</button></div>'
+    ).join('');
+    box.querySelectorAll('button[data-path]').forEach(b => {
+      b.onclick = async () => {
+        await fetch('/api/folders?path='+encodeURIComponent(b.dataset.path), { method:'DELETE' });
+        toast('已删除'); loadShares();
+      };
+    });
+  } catch(e) {}
+}
+$('addShareBtn').onclick = async () => {
+  const path = $('sharePathInput').value.trim();
+  if (!path) { toast('请输入文件夹路径'); return; }
+  const name = $('shareNameInput').value.trim();
+  const readonly = $('shareReadonlyChk').checked;
+  try {
+    const r = await fetch('/api/folders', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ path, name, readonly }) });
+    const d = await r.json();
+    if (d.ok) { toast('已添加共享'); $('sharePathInput').value=''; $('shareNameInput').value=''; $('shareReadonlyChk').checked=false; loadShares(); }
+    else toast('添加失败：'+(d.error||''));
+  } catch(e) { toast('添加失败'); }
+};
+
+// ---- 待确认接收（关闭自动保存时）----
+let pendingSeen = {};
+function showPendingDialog(name, size) {
+  const mask = document.createElement('div');
+  mask.className = 'modal-mask show';
+  mask.innerHTML = '<div class="modal"><h3>收到文件（自动保存已关闭）</h3>' +
+    '<div style="word-break:break-all;margin-bottom:6px;"><b>'+escapeHtml(name)+'</b>（'+fmtSize(size)+'）</div>' +
+    '<div class="btns">' +
+    '<button class="ghost" id="pdDiscard">拒绝</button>' +
+    '<button id="pdSave">保存</button></div></div>';
+  document.body.appendChild(mask);
+  mask.querySelector('#pdSave').onclick = async () => {
+    await fetch('/api/pending-confirm?name='+encodeURIComponent(name)+'&action=save', { method:'POST' });
+    mask.remove(); toast('已保存'); loadFiles();
+  };
+  mask.querySelector('#pdDiscard').onclick = async () => {
+    await fetch('/api/pending-confirm?name='+encodeURIComponent(name)+'&action=discard', { method:'POST' });
+    mask.remove(); toast('已拒绝');
+  };
+}
+async function loadPending() {
+  try {
+    const r = await fetch('/api/pending'); const list = await r.json();
+    list.forEach(f => {
+      if (pendingSeen[f.name]) return;
+      pendingSeen[f.name] = true;
+      showPendingDialog(f.name, f.size);
+    });
+  } catch(e) {}
+}
+
+initSession().then(() => { loadInfo(); loadDevices(); loadFiles(); loadStaged(); loadTexts(); loadInbox(); loadTransfers(); loadSettings(); loadPending(); loadShares(); });
+setInterval(() => { loadDevices(); loadFiles(); loadStaged(); loadTexts(); loadInbox(); loadPending(); }, 3000);
+setInterval(loadTransfers, 800);
+
+// ---- 拖拽发送 ----
+function handleDropItems(items) {
+  const files = [];
+  const entries = [];
+  for (const it of items) {
+    const entry = it.webkitGetAsEntry && it.webkitGetAsEntry();
+    if (entry) entries.push(entry);
+    else if (it.getAsFile) { const f = it.getAsFile(); if (f) files.push({name:f.name, file:f, rel:''}); }
+  }
+  const walk = (entry, rel) => new Promise(resolve => {
+    if (entry.isFile) {
+      entry.file(f => { files.push({name:f.name, file:f, rel}); resolve(); }, () => resolve());
+    } else if (entry.isDirectory) {
+      const reader = entry.createReader();
+      const readAll = () => reader.readEntries(batch => {
+        if (!batch.length) { resolve(); return; }
+        let p = Promise.resolve();
+        batch.forEach(e => { p = p.then(() => walk(e, rel ? rel+'/'+e.name : e.name)); });
+        p.then(readAll);
+      }, () => resolve());
+      readAll();
+    } else resolve();
+  });
+  Promise.all(entries.map(e => walk(e, ''))).then(() => {
+    if (files.length) { currentSend = {kind:'files', files}; openDeviceModal(); }
+    else toast('没有可发送的文件');
+  });
+}
+document.addEventListener('dragover', e => { e.preventDefault(); });
+document.addEventListener('drop', e => {
+  e.preventDefault();
+  if (e.dataTransfer && e.dataTransfer.items) handleDropItems(e.dataTransfer.items);
+  else if (e.dataTransfer && e.dataTransfer.files) {
+    const files = Array.from(e.dataTransfer.files).map(f => ({name:f.name, file:f, rel:''}));
+    if (files.length) { currentSend = {kind:'files', files}; openDeviceModal(); }
+  }
+});
+</script>
+</body>
+</html>
