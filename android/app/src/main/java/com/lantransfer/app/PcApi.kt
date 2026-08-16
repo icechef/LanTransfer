@@ -24,6 +24,7 @@ object PcApi {
         c.connectTimeout = 4000
         c.readTimeout = 10000
         c.requestMethod = "GET"
+        c.setRequestProperty("X-Client", "app")
         val body = if (c.responseCode == 200) c.inputStream.readBytes() else null
         c.disconnect()
         body
@@ -114,6 +115,7 @@ object PcApi {
             val c = URL(url).openConnection() as HttpURLConnection
             c.connectTimeout = 5000
             c.readTimeout = 120000
+            c.setRequestProperty("X-Client", "app")
             if (c.responseCode != 200) { c.disconnect(); return false }
             c.inputStream.use { input ->
                 val buf = ByteArray(1 shl 20)
@@ -152,6 +154,7 @@ object PcApi {
             c.requestMethod = "POST"
             c.doOutput = true
             c.setRequestProperty("Content-Type", "application/json")
+            c.setRequestProperty("X-Client", "app")
             val payload = JSONObject().apply {
                 put("targets", JSONArray().put("web:$sid"))
                 put("text", text)
@@ -176,6 +179,7 @@ object PcApi {
             c.requestMethod = "POST"
             c.doOutput = true
             c.setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
+            c.setRequestProperty("X-Client", "app")
             c.outputStream.use { raw ->
                 val dos = DataOutputStream(raw)
                 for ((k, v) in fields) {

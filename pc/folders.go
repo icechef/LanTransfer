@@ -43,9 +43,24 @@ func isWithin(base, p string) bool {
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) && !filepath.IsAbs(rel)
 }
 
+// isSharedFolderPath 判断路径是否位于某个共享文件夹内（而非缓存目录）。
+func isSharedFolderPath(path string) bool {
+	cleaned := filepath.Clean(path)
+	for _, f := range getConfig().SharedFolders {
+		if isWithin(f.Path, cleaned) {
+			return true
+		}
+	}
+	return false
+}
+
 // handleFolders 列出共享文件夹（含虚拟的「缓存目录」）；POST 添加、DELETE 删除。
 func (s *webServer) handleFolders(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
+		if !s.canModifySettings(r) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
 		var req struct {
 			Path     string `json:"path"`
 			Name     string `json:"name"`
@@ -82,6 +97,10 @@ func (s *webServer) handleFolders(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodDelete {
+		if !s.canModifySettings(r) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
 		path := r.URL.Query().Get("path")
 		cfg := getConfig()
 		var out []SharedFolder
@@ -103,8 +122,11 @@ func (s *webServer) handleFolders(w http.ResponseWriter, r *http.Request) {
 		Kind     string `json:"kind"` // "cache" | "folder"
 	}
 	out := []folderEntry{{Name: "缓存目录", Path: "", Readonly: false, Kind: "cache"}}
-	for _, f := range cfg.SharedFolders {
-		out = append(out, folderEntry{Name: f.Name, Path: f.Path, Readonly: f.Readonly, Kind: "folder"})
+	// 远程网页端无「查看共享文件夹」权限时，只返回缓存目录
+	if s.canViewShares(r) {
+		for _, f := range cfg.SharedFolders {
+			out = append(out, folderEntry{Name: f.Name, Path: f.Path, Readonly: f.Readonly, Kind: "folder"})
+		}
 	}
 	writeJSON(w, out)
 }
@@ -114,6 +136,11 @@ func (s *webServer) handleBrowse(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Query().Get("path")
 	abs, writable, ok := resolveSharedPath(path)
 	if !ok {
+		writeJSON(w, map[string]any{"ok": false, "error": "无权限访问该目录"})
+		return
+	}
+	// 共享文件夹需「查看共享文件夹」权限（缓存目录不受限）
+	if path != "" && isSharedFolderPath(path) && !s.canViewShares(r) {
 		writeJSON(w, map[string]any{"ok": false, "error": "无权限访问该目录"})
 		return
 	}

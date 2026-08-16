@@ -206,6 +206,10 @@ func printDevices(devs []Device) {
 }
 
 func defaultReceiveDir() string {
+	// 优先取 Windows 真实的「下载」文件夹（可能被重定向到 D 盘等）
+	if dir := knownFolderDownloads(); dir != "" {
+		return dir
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "received"

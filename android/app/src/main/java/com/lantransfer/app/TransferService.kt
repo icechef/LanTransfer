@@ -31,8 +31,16 @@ class TransferService : Service() {
         const val ACTION_RECEIVE_PROGRESS = "com.lantransfer.app.RECEIVE_PROGRESS"
         const val ACTION_TEXT = "com.lantransfer.app.TEXT"
         const val ACTION_PEER_FOUND = "com.lantransfer.app.PEER_FOUND"
+        const val ACTION_CANCEL_RECEIVE = "com.lantransfer.app.CANCEL_RECEIVE"
         private val notifSeq = AtomicInteger(1000)
         private fun nextNotifId() = notifSeq.incrementAndGet()
+
+        // taskId -> 正在接收的 socket，用于取消接收时关闭连接
+        private val activeSockets = java.util.concurrent.ConcurrentHashMap<Int, Socket>()
+
+        fun cancelReceive(taskId: Int) {
+            activeSockets.remove(taskId)?.let { try { it.close() } catch (_: Exception) {} }
+        }
     }
 
     private var serverSocket: ServerSocket? = null
@@ -160,6 +168,7 @@ class TransferService : Service() {
                         lastSpeedTime = 0L
                         lastSpeedWritten = 0L
                         taskId = nextNotifId()
+                        activeSockets[taskId] = s
 
                         // 断点续传：MediaStore 下查已有未收满的 .part
                         val pending = !SettingsStore.autoSave(this)
@@ -243,6 +252,11 @@ class TransferService : Service() {
             // 连接中断
         } finally {
             target?.discard(this)
+            // 清理本连接注册的取消 socket
+            val it = activeSockets.entries.iterator()
+            while (it.hasNext()) {
+                if (it.next().value === s) it.remove()
+            }
             try { s.close() } catch (_: Exception) {}
         }
     }
@@ -260,12 +274,21 @@ class TransferService : Service() {
 
     private fun postProgress(id: Int, from: String, name: String, total: Long, done: Long, speed: Double) {
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val cancelPi = PendingIntent.getBroadcast(
+            this, id,
+            Intent(this, ReceiveActionsReceiver::class.java).apply {
+                action = ACTION_CANCEL_RECEIVE
+                putExtra("taskId", id)
+            },
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
         val b = Notification.Builder(this, CHANNEL_PROGRESS)
             .setContentTitle("正在接收来自 $from 的文件")
             .setContentText("$name　${humanSize(speed.toLong())}/s")
             .setSmallIcon(android.R.drawable.stat_sys_download)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
+            .addAction(0, "取消", cancelPi)
         if (total > 0) {
             b.setProgress(100, ((done * 100) / total).toInt().coerceIn(0, 100), false)
         } else {

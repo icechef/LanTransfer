@@ -50,6 +50,13 @@ func (r *DeviceRegistry) list() []Device {
 	return out
 }
 
+// clear 清空设备列表（用于「重置设备列表」，去除失联设备）。
+func (r *DeviceRegistry) clear() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.items = map[string]Device{}
+}
+
 // sortDevices 稳定排序：按 IP 字典序、再按端口、再按设备名，避免列表顺序乱跳。
 func sortDevices(out []Device) {
 	sort.Slice(out, func(i, j int) bool {
@@ -156,7 +163,8 @@ func scanSubnet(reg *DeviceRegistry, port int, selfType string) []Device {
 		}
 		for i := 1; i <= 254; i++ {
 			target := net.IPv4(ip4[0], ip4[1], ip4[2], byte(i))
-			if isLocalIP(target) && port == selfListenPort {
+			// 本机 IP（含虚拟网卡）一律跳过，避免扫到自己
+			if isLocalIP(target) {
 				continue
 			}
 			wg.Add(1)

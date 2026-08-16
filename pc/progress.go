@@ -16,6 +16,8 @@ type Transfer struct {
 	Peer   string    `json:"peer"`   // 对端
 	Err    string    `json:"error,omitempty"`
 	Start  time.Time `json:"start"`
+
+	cancel chan struct{} `json:"-"`
 }
 
 type transferRegistry struct {
@@ -29,7 +31,7 @@ var transfers = &transferRegistry{items: map[string]*Transfer{}}
 func (tr *transferRegistry) create(dir, name, peer string, size int64) *Transfer {
 	tr.mu.Lock()
 	defer tr.mu.Unlock()
-	t := &Transfer{ID: newSID(), Dir: dir, Name: name, Size: size, Status: "running", Peer: peer, Start: time.Now()}
+	t := &Transfer{ID: newSID(), Dir: dir, Name: name, Size: size, Status: "running", Peer: peer, Start: time.Now(), cancel: make(chan struct{})}
 	tr.items[t.ID] = t
 	tr.order = append(tr.order, t.ID)
 	return t
@@ -53,6 +55,33 @@ func (tr *transferRegistry) finish(id, status, errMsg string) {
 			t.Done = t.Size
 		}
 	}
+}
+
+// cancel 取消一个运行中的任务（关闭其 cancel channel）。
+func (tr *transferRegistry) cancel(id string) bool {
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	t, ok := tr.items[id]
+	if !ok {
+		return false
+	}
+	select {
+	case <-t.cancel:
+		return false
+	default:
+		close(t.cancel)
+		return true
+	}
+}
+
+// cancelChan 返回任务的取消通道（不存在则返回 nil）。
+func (tr *transferRegistry) cancelChan(id string) <-chan struct{} {
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	if t, ok := tr.items[id]; ok {
+		return t.cancel
+	}
+	return nil
 }
 
 // list 返回活跃任务在前、其余按时间倒序，最多 50 条。

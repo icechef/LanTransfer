@@ -68,6 +68,8 @@ func startWeb(addr string, s *webServer) error {
 	mux.HandleFunc("/api/folders", s.handleFolders)
 	mux.HandleFunc("/api/browse", s.handleBrowse)
 	mux.HandleFunc("/api/upload-dir", s.handleUploadToDir)
+	mux.HandleFunc("/api/reset", s.handleReset)
+	mux.HandleFunc("/api/transfer/cancel", s.handleTransferCancel)
 	return http.ListenAndServe(addr, mux)
 }
 
@@ -92,14 +94,16 @@ func (s *webServer) handleInfo(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, map[string]any{
-		"name":       s.name,
-		"type":       s.dtype,
-		"ips":        ipStrs,
-		"port":       s.port,
-		"httpPort":   s.httpPort,
-		"lanURL":     lanURL,
-		"qr":         qr,
-		"receiveDir": s.receiveDir,
+		"name":        s.name,
+		"type":        s.dtype,
+		"ips":         ipStrs,
+		"port":        s.port,
+		"httpPort":    s.httpPort,
+		"lanURL":      lanURL,
+		"qr":          qr,
+		"receiveDir":  s.receiveDir,
+		"isLocal":     s.isLocalRequest(r),
+		"remotePerms": getConfig().RemotePerms,
 	})
 }
 
@@ -140,9 +144,12 @@ func (s *webServer) handleDevices(w http.ResponseWriter, r *http.Request) {
 	for i := range devices {
 		devices[i].Kind = "tcp"
 	}
-	// 把主机（本电脑）也作为可发送目标加入列表，让其他网页设备能看到主机并发送给它
-	if self := s.selfDevice(); self != nil {
-		devices = append(devices, *self)
+	// 把主机（本电脑）也作为可发送目标加入列表，让「其他」网页设备能看到主机并发送给它；
+	// 本机浏览器（localhost/本机 IP）不显示主机自己，避免扫到自己。
+	if !s.isLocalRequest(r) {
+		if self := s.selfDevice(); self != nil {
+			devices = append(devices, *self)
+		}
 	}
 	// 融合网页客户端设备（排除当前会话自己，并过滤掉本机网页终端——即电脑自己开的浏览器页面）
 	excludeSID := r.URL.Query().Get("sid")
@@ -160,6 +167,43 @@ func (s *webServer) handleDevices(w http.ResponseWriter, r *http.Request) {
 	}
 	sortDevices(devices)
 	writeJSON(w, devices)
+}
+
+// isLocalRequest 判断请求是否来自本机（主机自己开的浏览器页面）。
+func (s *webServer) isLocalRequest(r *http.Request) bool {
+	ip := net.ParseIP(clientIP(r))
+	return ip != nil && isLocalIP(ip)
+}
+
+// isAppRequest 判断请求是否来自手机 App（PcApi 带 X-Client: app 头，不受权限差分限制）。
+func isAppRequest(r *http.Request) bool {
+	return r.Header.Get("X-Client") == "app"
+}
+
+// canManage 本机网页端或手机 App 拥有完全权限。
+func (s *webServer) canManage(r *http.Request) bool {
+	return s.isLocalRequest(r) || isAppRequest(r)
+}
+
+func (s *webServer) canViewShares(r *http.Request) bool {
+	if s.canManage(r) {
+		return true
+	}
+	return getConfig().RemotePerms.ViewSharedFolders
+}
+
+func (s *webServer) canDeleteStaged(r *http.Request) bool {
+	if s.canManage(r) {
+		return true
+	}
+	return getConfig().RemotePerms.DeleteStaged
+}
+
+func (s *webServer) canModifySettings(r *http.Request) bool {
+	if s.canManage(r) {
+		return true
+	}
+	return getConfig().RemotePerms.ModifySettings
 }
 
 func (s *webServer) handleScan(w http.ResponseWriter, r *http.Request) {
@@ -357,7 +401,7 @@ func (s *webServer) handleSend(w http.ResponseWriter, r *http.Request) {
 			defer wg.Done()
 			err := sendBatch(target, s.name, s.dtype, items, func(done, total int64) {
 				transfers.update(tk.ID, done)
-			})
+			}, tk.cancel)
 			if err != nil {
 				transfers.finish(tk.ID, "error", err.Error())
 			} else {
@@ -529,10 +573,19 @@ func (s *webServer) handleDelete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	// 路径共享：只移除记录，不删除真实文件
+	// 路径共享：只移除记录，不删除真实文件（属修改共享）
 	if path := r.URL.Query().Get("path"); path != "" {
+		if !s.canModifySettings(r) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
 		shares.remove(path)
 		writeJSON(w, map[string]any{"ok": true})
+		return
+	}
+	// 删除文件（接收目录 / 缓存目录）需「删除暂存」权限
+	if !s.canDeleteStaged(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
 	name := sanitizeName(r.URL.Query().Get("name"))
@@ -583,6 +636,10 @@ func (s *webServer) handleShare(w http.ResponseWriter, r *http.Request) {
 func (s *webServer) handleClear(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.canDeleteStaged(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
 	dir := s.receiveDir
@@ -737,19 +794,61 @@ func (s *webServer) handleTransfers(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, transfers.list())
 }
 
-// handleSettings 读取或更新配置（接收目录 + 缓存目录 + 自动保存开关）。
+// handleReset 清空设备列表，用于去除失联设备。
+func (s *webServer) handleReset(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.canModifySettings(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	s.reg.clear()
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+// handleTransferCancel 取消一个运行中的发送任务。
+func (s *webServer) handleTransferCancel(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	id := r.URL.Query().Get("id")
+	if id == "" {
+		writeJSON(w, map[string]any{"ok": false, "error": "missing id"})
+		return
+	}
+	if transfers.cancel(id) {
+		transfers.finish(id, "error", "cancelled")
+		writeJSON(w, map[string]any{"ok": true})
+	} else {
+		writeJSON(w, map[string]any{"ok": false, "error": "task not found or already finished"})
+	}
+}
+
+// handleSettings 读取或更新配置（接收目录 + 缓存目录 + 自动保存开关 + 远程权限）。
 func (s *webServer) handleSettings(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
+		if !s.canModifySettings(r) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
 		var req struct {
-			ReceiveDir string `json:"receiveDir"`
-			CacheDir   string `json:"cacheDir"`
-			AutoSave   bool   `json:"autoSave"`
+			ReceiveDir  string            `json:"receiveDir"`
+			CacheDir    string            `json:"cacheDir"`
+			AutoSave    bool              `json:"autoSave"`
+			RemotePerms *RemotePermissions `json:"remotePerms"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
 		cfg := setConfig(strings.TrimSpace(req.ReceiveDir), strings.TrimSpace(req.CacheDir), req.AutoSave)
+		if req.RemotePerms != nil {
+			setRemotePerms(*req.RemotePerms)
+			cfg = getConfig()
+		}
 		if req.ReceiveDir != "" {
 			_ = os.MkdirAll(cfg.ReceiveDir, 0o755)
 		}
@@ -758,11 +857,11 @@ func (s *webServer) handleSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		s.receiveDir = cfg.ReceiveDir
 		s.cacheDir = cfg.CacheDir
-		writeJSON(w, map[string]any{"ok": true, "receiveDir": cfg.ReceiveDir, "cacheDir": cfg.CacheDir, "autoSave": cfg.AutoSave})
+		writeJSON(w, map[string]any{"ok": true, "receiveDir": cfg.ReceiveDir, "cacheDir": cfg.CacheDir, "autoSave": cfg.AutoSave, "remotePerms": cfg.RemotePerms})
 		return
 	}
 	cfg := getConfig()
-	writeJSON(w, map[string]any{"receiveDir": cfg.ReceiveDir, "cacheDir": cfg.CacheDir, "autoSave": cfg.AutoSave})
+	writeJSON(w, map[string]any{"receiveDir": cfg.ReceiveDir, "cacheDir": cfg.CacheDir, "autoSave": cfg.AutoSave, "remotePerms": cfg.RemotePerms})
 }
 
 // handlePending 列出待确认接收区的文件（关闭自动保存时收到）。

@@ -77,7 +77,10 @@
   </div>
 
   <div class="card">
-    <h2>发现设备</h2>
+    <div class="row" style="justify-content:space-between;">
+      <h2 style="margin:0;">发现设备</h2>
+      <button id="resetDevicesBtn" class="small">重置列表</button>
+    </div>
     <div id="devices"></div>
   </div>
 
@@ -131,7 +134,7 @@
     <div class="empty">即将上线，敬请期待。</div>
   </div>
 
-  <div class="card">
+  <div class="card" id="settingsCard">
     <h2>设置</h2>
     <div class="row" style="margin-bottom:10px;">
       <span style="font-size:13px;color:var(--muted);">接收目录</span>
@@ -147,7 +150,22 @@
     <button id="saveSettingsBtn" class="small">保存设置</button>
   </div>
 
-  <div class="card">
+  <div class="card" id="permCard">
+    <h2>其他网页端权限</h2>
+    <div class="hint" style="margin:0 0 8px;">控制「其他设备用浏览器打开」的网页端能做什么（本机网页端和手机 App 不受限）。</div>
+    <label style="font-size:13px;display:flex;align-items:center;gap:6px;margin-bottom:8px;">
+      <input type="checkbox" id="permViewShares"> 可以看到共享文件夹
+    </label>
+    <label style="font-size:13px;display:flex;align-items:center;gap:6px;margin-bottom:8px;">
+      <input type="checkbox" id="permDeleteStaged"> 可以删除暂存文件
+    </label>
+    <label style="font-size:13px;display:flex;align-items:center;gap:6px;margin-bottom:10px;">
+      <input type="checkbox" id="permModifySettings"> 可以修改设置和共享文件夹
+    </label>
+    <button id="savePermsBtn" class="small">保存权限</button>
+  </div>
+
+  <div class="card" id="shareCard">
     <h2>共享文件夹（手机可浏览/上传）</h2>
     <div class="row" style="margin-bottom:8px;">
       <input id="sharePathInput" type="text" placeholder="文件夹绝对路径，如 D:\docs" style="flex:1;border:1px solid var(--border);border-radius:8px;padding:6px 8px;font-size:13px;">
@@ -222,6 +240,10 @@ let mySid = localStorage.getItem('sid') || '';
 let myName = localStorage.getItem('myname') || '';
 let uploadPct = null;   // 非 null 表示正在上传到服务器（0-100）
 let activeTasks = {};   // taskId -> true（用于检测任务完成）
+let retryMap = {};      // taskId -> {targets, files}（用于失败重试）
+let isLocal = true;     // 是否主机网页端（本机浏览器）
+let remotePerms = {viewSharedFolders:true, deleteStaged:false, modifySettings:false};
+let canDelete = true;   // 当前是否可删除暂存文件
 
 function renderSelf() {
   $('devName').textContent = myName || '网页设备';
@@ -261,11 +283,29 @@ async function loadInfo() {
       seenFilesInit = false; seenFiles = {};
     }
     lastReceiveDir = d.receiveDir;
+    isLocal = !!d.isLocal;
+    remotePerms = d.remotePerms || {viewSharedFolders:true, deleteStaged:false, modifySettings:false};
+    applyPermissions();
     let html = '接收目录：<b>'+d.receiveDir+'</b><br>';
     if (d.lanURL) html += '局域网地址：<b>'+d.lanURL+'</b>';
     $('meta').innerHTML = html;
     if (d.qr) $('qr').src = d.qr; else $('qr').style.display = 'none';
   } catch(e) {}
+}
+
+// 根据「是否主机网页端」与「远程权限」显隐相关卡片/按钮
+function applyPermissions() {
+  // 权限设置卡片仅主机网页端可见
+  $('permCard').style.display = isLocal ? '' : 'none';
+  // 共享文件夹卡片：远程无权限则隐藏
+  $('shareCard').style.display = (isLocal || remotePerms.viewSharedFolders) ? '' : 'none';
+  // 设置卡片：远程无权限则隐藏
+  $('settingsCard').style.display = (isLocal || remotePerms.modifySettings) ? '' : 'none';
+  // 暂存文件的删除/清空：远程无权限则隐藏（渲染时也判断）
+  canDelete = isLocal || remotePerms.deleteStaged;
+  $('clearStagedBtn').style.display = canDelete ? '' : 'none';
+  // 发现设备的重置按钮：仅主机可见
+  $('resetDevicesBtn').style.display = isLocal ? '' : 'none';
 }
 
 function deviceAddr(d) {
@@ -335,8 +375,8 @@ function renderFileList(box, list, reload) {
       delUrl = '/api/delete?name='+encodeURIComponent(f.name);
     }
     const tag = f.source === 'share' ? '<span class="s" style="color:#16a34a;">路径</span>' : '';
-    return '<div class="file"><a href="'+dl+'">'+escapeHtml(f.name)+'</a>'+tag+'<span class="s">'+fmtSize(f.size)+'</span>' +
-      '<button class="del" data-url="'+escapeHtml(delUrl)+'" data-reload="'+reload+'">删除</button></div>';
+    const delBtn = canDelete ? '<button class="del" data-url="'+escapeHtml(delUrl)+'" data-reload="'+reload+'">删除</button>' : '';
+    return '<div class="file"><a href="'+dl+'">'+escapeHtml(f.name)+'</a>'+tag+'<span class="s">'+fmtSize(f.size)+'</span>'+delBtn+'</div>';
   }).join('');
   box.querySelectorAll('button.del').forEach(b => {
     b.onclick = async () => {
@@ -508,21 +548,47 @@ function progHtml(label, sub, pct) {
   return '<div class="prog"><div class="ph"><span>'+escapeHtml(label)+'</span><span class="sub">'+(sub?escapeHtml(sub)+' · ':'')+pct+'%</span></div>' +
     '<div class="bar"><div class="fill" style="width:'+pct+'%"></div></div></div>';
 }
-function renderProgress(runningTasks) {
+function renderProgress(running, failed) {
   let html = '';
   if (uploadPct !== null) html += progHtml('上传到服务器', '', uploadPct);
-  runningTasks.forEach(t => {
+  running.forEach(t => {
     const pct = t.size > 0 ? Math.round(t.done/t.size*100) : 0;
     const dir = t.dir === 'send' ? '发送' : '接收';
-    html += progHtml(dir+' '+t.name, t.peer, pct);
+    html += '<div class="prog"><div class="ph"><span>'+escapeHtml(dir+' '+t.name)+'</span><span class="sub">'+escapeHtml(t.peer||'')+' · '+pct+'%</span></div>' +
+      '<div class="bar"><div class="fill" style="width:'+pct+'%"></div></div>' +
+      (t.dir === 'send' ? '<button class="small danger" style="margin-top:6px;" data-cancel="'+t.id+'">取消</button>' : '') +
+      '</div>';
   });
-  if (html) { $('progressCard').style.display = ''; $('progressList').innerHTML = html; }
+  failed.forEach(t => {
+    const dir = t.dir === 'send' ? '发送' : '接收';
+    const msg = t.error === 'cancelled' ? '已取消' : (t.error || '失败');
+    html += '<div class="prog"><div class="ph"><span>'+escapeHtml(dir+' '+t.name+'：'+msg)+'</span></div>' +
+      (retryMap[t.id] ? '<button class="small" style="margin-top:6px;" data-retry="'+t.id+'">重试</button>' : '') +
+      '</div>';
+  });
+  if (html) { $('progressCard').style.display = ''; $('progressList').innerHTML = html; bindProgressButtons(); }
   else $('progressCard').style.display = 'none';
+}
+function bindProgressButtons() {
+  document.querySelectorAll('#progressList button[data-cancel]').forEach(b => {
+    b.onclick = async () => {
+      await fetch('/api/transfer/cancel?id='+encodeURIComponent(b.dataset.cancel), { method:'POST' });
+      toast('已取消');
+      loadTransfers();
+    };
+  });
+  document.querySelectorAll('#progressList button[data-retry]').forEach(b => {
+    b.onclick = () => {
+      const r = retryMap[b.dataset.retry];
+      if (r) sendFilesTo(r.targets, r.files);
+    };
+  });
 }
 async function loadTransfers() {
   try {
     const r = await fetch('/api/transfers'); const list = await r.json();
     const running = list.filter(t => t.status === 'running');
+    const failed = list.filter(t => t.status === 'error' && retryMap[t.id]);
     list.forEach(t => {
       if (activeTasks[t.id] && t.status !== 'running') {
         if (t.status === 'done') toast((t.dir==='send'?'发送':'接收')+'完成：'+t.name);
@@ -531,7 +597,7 @@ async function loadTransfers() {
     });
     const na = {}; running.forEach(t => { na[t.id] = true; });
     activeTasks = na;
-    renderProgress(running);
+    renderProgress(running, failed);
   } catch(e) {}
 }
 
@@ -553,7 +619,7 @@ async function sendFilesTo(targets, files) {
     try { d = JSON.parse(xhr.responseText); } catch(e) {}
     if (d.ok) {
       if (d.tasks && d.tasks.length) {
-        d.tasks.forEach(id => { activeTasks[id] = true; });
+        d.tasks.forEach(id => { activeTasks[id] = true; retryMap[id] = {targets: targets, files: files}; });
         toast('已开始发送');
       } else if (d.webSent) {
         toast('已发送给 '+d.webSent+' 个网页设备');
@@ -674,6 +740,10 @@ async function loadSettings() {
     $('dirInput').value = d.receiveDir || '';
     $('cacheInput').value = d.cacheDir || '';
     $('autoSaveChk').checked = d.autoSave !== false;
+    const p = d.remotePerms || {};
+    $('permViewShares').checked = p.viewSharedFolders !== false;
+    $('permDeleteStaged').checked = !!p.deleteStaged;
+    $('permModifySettings').checked = !!p.modifySettings;
   } catch(e) {}
 }
 $('saveSettingsBtn').onclick = async () => {
@@ -686,6 +756,27 @@ $('saveSettingsBtn').onclick = async () => {
     if (d.ok) { toast('设置已保存'); loadInfo(); }
     else toast('保存失败：'+(d.error||''));
   } catch(e) { toast('保存失败'); }
+};
+$('savePermsBtn').onclick = async () => {
+  const remotePerms = {
+    viewSharedFolders: $('permViewShares').checked,
+    deleteStaged: $('permDeleteStaged').checked,
+    modifySettings: $('permModifySettings').checked,
+  };
+  try {
+    const r = await fetch('/api/settings', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ remotePerms }) });
+    const d = await r.json();
+    if (d.ok) { toast('权限已保存'); loadInfo(); }
+    else toast('保存失败：'+(d.error||''));
+  } catch(e) { toast('保存失败'); }
+};
+$('resetDevicesBtn').onclick = async () => {
+  if (!confirm('确定清空设备列表？已上线的设备会重新被发现。')) return;
+  try {
+    await fetch('/api/reset', { method:'POST' });
+    toast('已重置设备列表');
+    loadDevices();
+  } catch(e) { toast('重置失败'); }
 };
 
 // ---- 共享文件夹 ----

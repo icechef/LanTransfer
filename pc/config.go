@@ -14,13 +14,21 @@ type SharedFolder struct {
 	Readonly bool   `json:"readonly"`
 }
 
+// RemotePermissions 控制「其他网页端（远程浏览器）」的权限；本机网页端和手机 App 不受限。
+type RemotePermissions struct {
+	ViewSharedFolders bool `json:"viewSharedFolders"` // 看到共享文件夹（浏览/下载）
+	DeleteStaged      bool `json:"deleteStaged"`      // 删除暂存文件夹的文件
+	ModifySettings    bool `json:"modifySettings"`    // 修改设置和共享文件夹
+}
+
 // AppConfig 是可持久化的运行时配置。
 type AppConfig struct {
-	ReceiveDir    string         `json:"receiveDir"`    // 接收目录（真正收到的文件）
-	CacheDir      string         `json:"cacheDir"`      // 缓存目录（上传暂存 + 网页中转）
-	AutoSave      bool           `json:"autoSave"`      // 是否自动保存（关闭则收到文件先进入待确认区）
-	DeviceName    string         `json:"deviceName"`    // 设备别称（网页端设置，覆盖主机名）
-	SharedFolders []SharedFolder `json:"sharedFolders"` // 共享给手机的文件夹
+	ReceiveDir    string            `json:"receiveDir"`    // 接收目录（真正收到的文件）
+	CacheDir      string            `json:"cacheDir"`      // 缓存目录（上传暂存 + 网页中转）
+	AutoSave      bool              `json:"autoSave"`      // 是否自动保存（关闭则收到文件先进入待确认区）
+	DeviceName    string            `json:"deviceName"`    // 设备别称（网页端设置，覆盖主机名）
+	SharedFolders []SharedFolder    `json:"sharedFolders"` // 共享给手机的文件夹
+	RemotePerms   RemotePermissions `json:"remotePerms"`   // 远程网页端权限
 }
 
 var (
@@ -49,6 +57,11 @@ func loadConfig(initialDir string) AppConfig {
 			cfg.CacheDir = saved.CacheDir
 			cfg.DeviceName = saved.DeviceName
 			cfg.SharedFolders = saved.SharedFolders
+			cfg.RemotePerms = saved.RemotePerms
+			if !saved.RemotePerms.ViewSharedFolders && !saved.RemotePerms.DeleteStaged && !saved.RemotePerms.ModifySettings {
+				// 老配置无权限字段（全 false），默认允许看共享文件夹以保持向后兼容
+				cfg.RemotePerms.ViewSharedFolders = true
+			}
 		}
 	}
 	// 首次运行默认缓存目录为接收目录下的 .cache 子目录，之后作为独立字段持久化
@@ -99,6 +112,16 @@ func setDeviceName(name string) {
 	configMu.Lock()
 	defer configMu.Unlock()
 	config.DeviceName = name
+	if data, err := json.MarshalIndent(config, "", "  "); err == nil {
+		_ = os.WriteFile(configPath(), data, 0o644)
+	}
+}
+
+// setRemotePerms 更新并持久化远程网页端权限。
+func setRemotePerms(p RemotePermissions) {
+	configMu.Lock()
+	defer configMu.Unlock()
+	config.RemotePerms = p
 	if data, err := json.MarshalIndent(config, "", "  "); err == nil {
 		_ = os.WriteFile(configPath(), data, 0o644)
 	}

@@ -64,6 +64,14 @@
         android:textColor="#2563EB"
         android:visibility="gone" />
 
+    <Button
+        android:id="@+id/receiveCancelBtn"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:text="取消接收"
+        android:visibility="gone" />
+
     <TextView
         android:id="@+id/status"
         android:layout_width="match_parent"
@@ -229,11 +237,27 @@
         android:visibility="gone" />
 
     <Button
+        android:id="@+id/sendCancelBtn"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:text="取消发送"
+        android:visibility="gone" />
+
+    <Button
         android:id="@+id/sendBtn"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="6dp"
         android:text="发送（0 个文件）" />
+
+    <Button
+        android:id="@+id/retrySendBtn"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:text="重新发送"
+        android:visibility="gone" />
 
     <LinearLayout
         android:layout_width="match_parent"

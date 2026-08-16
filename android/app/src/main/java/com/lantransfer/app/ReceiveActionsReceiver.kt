@@ -15,6 +15,7 @@ class ReceiveActionsReceiver : BroadcastReceiver() {
     companion object {
         const val ACTION_SAVE = "com.lantransfer.app.SAVE_PENDING"
         const val ACTION_REJECT = "com.lantransfer.app.REJECT_PENDING"
+        const val ACTION_CANCEL_RECEIVE = "com.lantransfer.app.CANCEL_RECEIVE"
         const val EXTRA_CACHE = "cache"
         const val EXTRA_NAME = "name"
         const val EXTRA_REL_DIR = "rel_dir"
@@ -25,6 +26,12 @@ class ReceiveActionsReceiver : BroadcastReceiver() {
     }
 
     override fun onReceive(context: Context, intent: Intent) {
+        // 取消接收：关闭对应任务的连接
+        if (intent.action == ACTION_CANCEL_RECEIVE) {
+            val taskId = intent.getIntExtra("taskId", -1)
+            if (taskId > 0) TransferService.cancelReceive(taskId)
+            return
+        }
         val cache = intent.getStringExtra(EXTRA_CACHE) ?: return
         val name = intent.getStringExtra(EXTRA_NAME) ?: "文件"
         val relDir = intent.getStringExtra(EXTRA_REL_DIR) ?: ""

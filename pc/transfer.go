@@ -150,7 +150,7 @@ func receiveLoop(conn net.Conn, peerName string) {
 					name = sanitizeName(filepath.Base(rel))
 				}
 			}
-			finalPath = uniquePath(filepath.Join(dir, name))
+			finalPath = filepath.Join(dir, name) // 重传同名文件直接覆盖，不再加 (1) 后缀
 			partPath = finalPath + ".part"
 			hash = md5.New()
 			written = 0
@@ -213,6 +213,8 @@ func receiveLoop(conn net.Conn, peerName string) {
 						return
 					}
 				}
+				// 覆盖同名旧文件（Windows 上 rename 到已存在目标会失败，先删）
+				_ = os.Remove(finalPath)
 				if err := os.Rename(partPath, finalPath); err != nil {
 					_ = os.Remove(partPath)
 					transfers.finish(taskID, "error", err.Error())
@@ -237,7 +239,7 @@ type sendItem struct {
 
 // sendBatch 连接目标并发送一批文件（支持文件夹相对路径）。
 // onProgress 每写完一块回调一次，参数为 (累计已发字节, 总字节)。
-func sendBatch(target, selfName, selfType string, items []sendItem, onProgress func(done, total int64)) error {
+func sendBatch(target, selfName, selfType string, items []sendItem, onProgress func(done, total int64), cancel <-chan struct{}) error {
 	conn, err := net.DialTimeout("tcp", target, 3*time.Second)
 	if err != nil {
 		return err
@@ -268,7 +270,7 @@ func sendBatch(target, selfName, selfType string, items []sendItem, onProgress f
 			if onProgress != nil {
 				onProgress(base+n, total)
 			}
-		}); err != nil {
+		}, cancel); err != nil {
 			return err
 		}
 		if st, err := os.Stat(it.path); err == nil {
@@ -284,7 +286,7 @@ func sendFiles(target, selfName, selfType string, files []string) error {
 	for i, f := range files {
 		items[i] = sendItem{path: f}
 	}
-	return sendBatch(target, selfName, selfType, items, nil)
+	return sendBatch(target, selfName, selfType, items, nil, nil)
 }
 
 // sendText 连接目标并发送一条文本/剪贴板消息。
@@ -303,7 +305,7 @@ func sendText(target, selfName, selfType, text string) error {
 	return writeFrame(conn, Header{Type: "text", Text: text, DeviceName: selfName}, nil)
 }
 
-func sendOne(conn net.Conn, it sendItem, fi, total int, onProgress func(int64)) error {
+func sendOne(conn net.Conn, it sendItem, fi, total int, onProgress func(int64), cancel <-chan struct{}) error {
 	f, err := os.Open(it.path)
 	if err != nil {
 		return err
@@ -351,6 +353,14 @@ func sendOne(conn net.Conn, it sendItem, fi, total int, onProgress func(int64)) 
 	var idx int64
 	var sent int64
 	for {
+		// 检查取消
+		if cancel != nil {
+			select {
+			case <-cancel:
+				return errors.New("cancelled")
+			default:
+			}
+		}
 		n, rerr := f.Read(buf)
 		if n > 0 {
 			if err := writeFrame(conn, Header{Type: "file_data", FileID: fileID, ChunkIndex: idx}, buf[:n]); err != nil {

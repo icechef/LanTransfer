@@ -63,6 +63,13 @@ class MainActivity : AppCompatActivity() {
 
     private val sendPool = Executors.newSingleThreadExecutor()
 
+    // 发送取消标志（用户点「取消发送」时置位，sendOne 循环检查）
+    @Volatile private var sendCancelled = false
+
+    // 最近一次发送的目标与文件（用于「重新发送」）
+    private var lastSendTargets: List<Device> = emptyList()
+    private var lastSendFiles: List<PendingFile> = emptyList()
+
     // 并发接收任务进度（taskId -> 进度），合并显示总进度
     private data class ReceiveTask(val name: String, val from: String, val done: Long, val total: Long, val speed: Long)
     private val receiveTasks = HashMap<Int, ReceiveTask>()
@@ -133,6 +140,9 @@ class MainActivity : AppCompatActivity() {
 
         findViewById<Button>(R.id.scanBtn).setOnClickListener { scan() }
         findViewById<Button>(R.id.sendBtn).setOnClickListener { doSend() }
+        findViewById<Button>(R.id.sendCancelBtn).setOnClickListener { sendCancelled = true }
+        findViewById<Button>(R.id.retrySendBtn).setOnClickListener { retrySend() }
+        findViewById<Button>(R.id.receiveCancelBtn).setOnClickListener { cancelReceives() }
         findViewById<Button>(R.id.startServiceBtn).setOnClickListener { startTransferService() }
         findViewById<Button>(R.id.connectBtn).setOnClickListener { connectManual() }
         findViewById<Button>(R.id.sendTextBtn).setOnClickListener { promptSendText() }
@@ -269,8 +279,12 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, "未发现设备，请先扫描", Toast.LENGTH_SHORT).show()
             return
         }
+        val showIp = SettingsStore.showIp(this)
         val names = devices.map {
-            if (it.isWeb) "${it.name}（网页）" else "${it.name}（${it.type}）\n${it.addr}"
+            if (it.isWeb) "${it.name}（网页）" else {
+                val base = "${it.name}（${it.type}）"
+                if (showIp) "$base\n${it.addr}" else base
+            }
         }.toTypedArray()
         if (multiSelect) {
             val checked = BooleanArray(devices.size)
@@ -485,6 +499,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun doSendTo(targets: List<Device>, files: List<PendingFile>) {
+        lastSendTargets = targets
+        lastSendFiles = files
+        sendCancelled = false
         val perDevice = files.sumOf { it.size }
         val grandTotal = perDevice * targets.size
         val startAt = SystemClock.elapsedRealtime()
@@ -494,8 +511,10 @@ class MainActivity : AppCompatActivity() {
         sendPool.execute {
             var ok = 0
             var fail = 0
+            var cancelled = false
             runOnUiThread { showProgress() }
             for (t in targets) {
+                if (sendCancelled) { cancelled = true; break }
                 val base = doneHolder[0]
                 val success = try {
                     if (t.isWeb) {
@@ -513,12 +532,31 @@ class MainActivity : AppCompatActivity() {
                 runOnUiThread { updateProgress(doneHolder[0], grandTotal, startAt) }
                 if (success) ok++ else fail++
             }
+            val finalOk = ok
+            val finalFail = fail
+            val wasCancelled = cancelled || sendCancelled
             runOnUiThread {
                 hideProgress()
-                status.text = "发送完成：成功 $ok 台，失败 $fail 台"
-                Toast.makeText(this, "发送完成：成功 $ok 台，失败 $fail 台", Toast.LENGTH_SHORT).show()
+                if (wasCancelled) {
+                    status.text = "已取消发送"
+                    Toast.makeText(this, "已取消发送，可重新发送", Toast.LENGTH_SHORT).show()
+                } else {
+                    status.text = "发送完成：成功 $finalOk 台，失败 $finalFail 台"
+                    Toast.makeText(this, "发送完成：成功 $finalOk 台，失败 $finalFail 台" + if (finalFail > 0) "，可重新发送" else "", Toast.LENGTH_SHORT).show()
+                }
+                // 有失败或取消时显示「重新发送」
+                findViewById<Button>(R.id.retrySendBtn).visibility = if (finalFail > 0 || wasCancelled) View.VISIBLE else View.GONE
             }
         }
+    }
+
+    private fun retrySend() {
+        if (lastSendFiles.isEmpty()) {
+            Toast.makeText(this, "没有可重新发送的内容", Toast.LENGTH_SHORT).show()
+            return
+        }
+        findViewById<Button>(R.id.retrySendBtn).visibility = View.GONE
+        doSendTo(lastSendTargets, lastSendFiles)
     }
 
     private fun sendToTarget(target: String, files: List<PendingFile>, onProgress: (Long) -> Unit) {
@@ -576,6 +614,7 @@ class MainActivity : AppCompatActivity() {
             val buf = ByteArray(1 shl 20)
             var idx = 0L
             while (true) {
+                if (sendCancelled) throw RuntimeException("cancelled")
                 val n = fin.read(buf)
                 if (n <= 0) break
                 val chunk = if (n == buf.size) buf else buf.copyOf(n)
@@ -664,6 +703,7 @@ class MainActivity : AppCompatActivity() {
     private fun showProgress() {
         progressBar.visibility = View.VISIBLE
         progressText.visibility = View.VISIBLE
+        findViewById<Button>(R.id.sendCancelBtn).visibility = View.VISIBLE
         progressBar.progress = 0
     }
 
@@ -678,6 +718,7 @@ class MainActivity : AppCompatActivity() {
     private fun hideProgress() {
         progressBar.visibility = View.GONE
         progressText.visibility = View.GONE
+        findViewById<Button>(R.id.sendCancelBtn).visibility = View.GONE
     }
 
     // 合并渲染所有并发接收任务的总进度
@@ -685,6 +726,7 @@ class MainActivity : AppCompatActivity() {
         if (receiveTasks.isEmpty()) {
             receiveProgressBar.visibility = View.GONE
             receiveProgressText.visibility = View.GONE
+            findViewById<Button>(R.id.receiveCancelBtn).visibility = View.GONE
             return
         }
         val totalDone = receiveTasks.values.sumOf { it.done }
@@ -693,10 +735,21 @@ class MainActivity : AppCompatActivity() {
         val count = receiveTasks.size
         receiveProgressBar.visibility = View.VISIBLE
         receiveProgressText.visibility = View.VISIBLE
+        findViewById<Button>(R.id.receiveCancelBtn).visibility = View.VISIBLE
         val pct = if (totalSize > 0) ((totalDone * 100) / totalSize).toInt().coerceIn(0, 100) else 0
         receiveProgressBar.progress = pct
         val label = if (count > 1) "正在接收 $count 个文件" else "正在接收：${receiveTasks.values.first().name}"
         receiveProgressText.text = "$label　${humanSize(totalDone)} / ${humanSize(totalSize)}　${humanSize(totalSpeed)}/s"
+    }
+
+    // 取消所有正在接收的任务（关闭对应连接）
+    private fun cancelReceives() {
+        val ids = receiveTasks.keys.toList()
+        for (id in ids) TransferService.cancelReceive(id)
+        receiveTasks.clear()
+        renderReceiveProgress()
+        status.text = "已取消接收"
+        Toast.makeText(this, "已取消接收", Toast.LENGTH_SHORT).show()
     }
 
     // ---- 应用内横幅 ----
