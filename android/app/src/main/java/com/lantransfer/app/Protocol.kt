@@ -29,7 +29,8 @@ object Protocol {
         var text: String? = null
         var relPath: String? = null
         var md5: String? = null      // file_end 时整文件 MD5（32 位小写 hex）
-        var offset: Long = 0         // ack 时告知已收字节数（断点续传）
+        var mtime: Long = 0          // file_meta 时源文件修改时间（Unix 秒）
+        var offset: Long = 0         // 已废弃（断点续传移除），仅向后兼容
 
         fun toJson(): JSONObject {
             val o = JSONObject()
@@ -52,6 +53,7 @@ object Protocol {
             text?.let { o.put("text", it) }
             relPath?.let { o.put("relPath", it) }
             md5?.let { o.put("md5", it) }
+            if (mtime != 0L) o.put("mtime", mtime)
             if (offset != 0L) o.put("offset", offset)
             return o
         }
@@ -78,6 +80,7 @@ object Protocol {
                 h.text = o.optString("text").takeIf { it.isNotEmpty() }
                 h.relPath = o.optString("relPath").takeIf { it.isNotEmpty() }
                 h.md5 = o.optString("md5").takeIf { it.isNotEmpty() }
+                h.mtime = o.optLong("mtime", 0)
                 h.offset = o.optLong("offset", 0)
                 return h
             }

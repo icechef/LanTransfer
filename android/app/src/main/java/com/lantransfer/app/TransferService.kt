@@ -7,6 +7,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.net.Uri
 import android.net.wifi.WifiManager
 import android.os.Build
@@ -29,6 +30,7 @@ class TransferService : Service() {
         private const val CHANNEL_EVENTS = "transfer_events_v2"
         const val ACTION_RECEIVED = "com.lantransfer.app.RECEIVED"
         const val ACTION_RECEIVE_PROGRESS = "com.lantransfer.app.RECEIVE_PROGRESS"
+        const val ACTION_RECEIVE_END = "com.lantransfer.app.RECEIVE_END"
         const val ACTION_TEXT = "com.lantransfer.app.TEXT"
         const val ACTION_PEER_FOUND = "com.lantransfer.app.PEER_FOUND"
         const val ACTION_CANCEL_RECEIVE = "com.lantransfer.app.CANCEL_RECEIVE"
@@ -48,12 +50,14 @@ class TransferService : Service() {
     private var serverThread: Thread? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
+    private var syncTriggerReceiver: SyncTriggerReceiver? = null
 
     override fun onCreate() {
         super.onCreate()
         createChannels()
         startForeground(NOTIF_ID, buildNotification())
         acquireLocks()
+        registerSyncTrigger()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -64,6 +68,7 @@ class TransferService : Service() {
     override fun onDestroy() {
         stopServer()
         releaseLocks()
+        unregisterSyncTrigger()
         super.onDestroy()
     }
 
@@ -130,8 +135,36 @@ class TransferService : Service() {
         try { serverSocket?.close() } catch (_: Exception) {}
     }
 
+    // 动态注册空闲同步触发（熄屏/充电），屏幕广播必须运行时注册才能收到
+    private fun registerSyncTrigger() {
+        try {
+            if (syncTriggerReceiver == null) {
+                syncTriggerReceiver = SyncTriggerReceiver()
+                val filter = IntentFilter().apply {
+                    addAction(Intent.ACTION_SCREEN_OFF)
+                    addAction(Intent.ACTION_POWER_CONNECTED)
+                }
+                if (Build.VERSION.SDK_INT >= 33) {
+                    registerReceiver(syncTriggerReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+                } else {
+                    @Suppress("DEPRECATION")
+                    registerReceiver(syncTriggerReceiver, filter)
+                }
+            }
+        } catch (_: Exception) {}
+    }
+
+    private fun unregisterSyncTrigger() {
+        try { syncTriggerReceiver?.let { unregisterReceiver(it) } } catch (_: Exception) {}
+        syncTriggerReceiver = null
+    }
+
     private fun handle(s: Socket) {
         var target: ReceiveStorage.Target? = null
+        // 连接级状态：放在 try 外，供 catch/finally 清理与广播使用
+        var currentName = ""
+        var currentMtime = 0L
+        var taskId = 0
         try {
             val out = s.getOutputStream()
             val input = s.getInputStream()
@@ -140,13 +173,11 @@ class TransferService : Service() {
             broadcastPeer(helloResp.first)
 
             var fromName = "未知设备"
-            var currentName = ""
             var currentSize = 0L
             var written = 0L
             var lastNotify = 0L
             var lastSpeedTime = 0L
             var lastSpeedWritten = 0L
-            var taskId = 0
             var digest: MessageDigest? = null
 
             while (true) {
@@ -165,17 +196,15 @@ class TransferService : Service() {
                         val name = if (rel.contains('/')) rel.substringAfterLast('/') else (h.fileName ?: "file.bin")
                         currentName = name
                         currentSize = h.fileSize
+                        currentMtime = h.mtime
                         lastSpeedTime = 0L
                         lastSpeedWritten = 0L
                         taskId = nextNotifId()
                         activeSockets[taskId] = s
 
-                        // 断点续传：MediaStore 下查已有未收满的 .part
                         val pending = !SettingsStore.autoSave(this)
-                        var offset = if (!pending) ReceiveStorage.findPartial(this, name, relDir) else 0L
-                        if (offset >= currentSize) offset = 0L
-
-                        val created = ReceiveStorage.open(this, name, relDir, pending, offset)
+                        // 断点续传已移除：总是从 0 新建 .part 重写
+                        val created = ReceiveStorage.open(this, name, relDir, pending, h.mtime)
                         if (created == null) {
                             Protocol.write(out, Protocol.Header().apply {
                                 type = "error"; message = "create file failed"
@@ -185,9 +214,9 @@ class TransferService : Service() {
                         }
                         target = created
                         digest = created.digest
-                        written = created.offset
+                        written = 0L
                         reportProgress(taskId, fromName, name, currentSize, written, 0.0)
-                        Protocol.write(out, Protocol.Header().apply { type = "ack"; offset = created.offset })
+                        Protocol.write(out, Protocol.Header().apply { type = "ack" })
                     }
 
                     "file_data" -> {
@@ -234,7 +263,7 @@ class TransferService : Service() {
                                 }
                             }
                             if (t.pending) {
-                                postPending(fromName, currentName, t.cacheFile!!.absolutePath, t.relDir, currentSize)
+                                postPending(fromName, currentName, t.cacheFile!!.absolutePath, t.relDir, currentSize, currentMtime)
                             } else {
                                 t.commit(this)
                                 HistoryStore.addFile(this, t.uri.toString(), currentName, currentSize, fromName)
@@ -249,9 +278,13 @@ class TransferService : Service() {
                 }
             }
         } catch (_: Exception) {
-            // 连接中断
+            // 连接中断：通知失败并广播结束，避免界面进度条卡住
+            if (target != null) {
+                postFailure(currentName, "连接中断")
+            }
         } finally {
             target?.discard(this)
+            if (taskId != 0) broadcastReceiveEnd(taskId, currentName)
             // 清理本连接注册的取消 socket
             val it = activeSockets.entries.iterator()
             while (it.hasNext()) {
@@ -314,7 +347,7 @@ class TransferService : Service() {
         nm.notify(nextNotifId(), n)
     }
 
-    private fun postPending(from: String, name: String, cachePath: String, relDir: String, size: Long) {
+    private fun postPending(from: String, name: String, cachePath: String, relDir: String, size: Long, mtime: Long) {
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         val appPi = PendingIntent.getActivity(
             this, nextNotifId(),
@@ -329,8 +362,8 @@ class TransferService : Service() {
             .setSmallIcon(android.R.drawable.stat_sys_download_done)
             .setAutoCancel(true)
             .setContentIntent(appPi)
-            .addAction(0, "保存", actionPendingIntent(ReceiveActionsReceiver.ACTION_SAVE, cachePath, name, relDir, from, size))
-            .addAction(0, "拒绝", actionPendingIntent(ReceiveActionsReceiver.ACTION_REJECT, cachePath, name, relDir, from, size))
+            .addAction(0, "保存", actionPendingIntent(ReceiveActionsReceiver.ACTION_SAVE, cachePath, name, relDir, from, size, mtime))
+            .addAction(0, "拒绝", actionPendingIntent(ReceiveActionsReceiver.ACTION_REJECT, cachePath, name, relDir, from, size, mtime))
             .build()
         nm.notify(nextNotifId(), n)
     }
@@ -358,7 +391,7 @@ class TransferService : Service() {
         )
     }
 
-    private fun actionPendingIntent(action: String, cachePath: String, name: String, relDir: String, from: String, size: Long): PendingIntent {
+    private fun actionPendingIntent(action: String, cachePath: String, name: String, relDir: String, from: String, size: Long, mtime: Long): PendingIntent {
         val i = Intent(this, ReceiveActionsReceiver::class.java).apply {
             this.action = action
             putExtra(ReceiveActionsReceiver.EXTRA_CACHE, cachePath)
@@ -366,6 +399,7 @@ class TransferService : Service() {
             putExtra(ReceiveActionsReceiver.EXTRA_REL_DIR, relDir)
             putExtra(ReceiveActionsReceiver.EXTRA_FROM, from)
             putExtra(ReceiveActionsReceiver.EXTRA_SIZE, size)
+            putExtra(ReceiveActionsReceiver.EXTRA_MTIME, mtime)
         }
         return PendingIntent.getBroadcast(
             this, nextNotifId(), i,
@@ -395,6 +429,16 @@ class TransferService : Service() {
             putExtra("name", name)
             putExtra("from", from)
             putExtra("uri", uri)
+        }
+        sendBroadcast(i)
+    }
+
+    // 接收结束（失败/取消/断连）：通知界面移除对应任务，避免进度条常驻
+    private fun broadcastReceiveEnd(taskId: Int, name: String) {
+        val i = Intent(ACTION_RECEIVE_END).apply {
+            setPackage(packageName)
+            putExtra("taskId", taskId)
+            putExtra("name", name)
         }
         sendBroadcast(i)
     }

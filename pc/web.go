@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -70,6 +71,7 @@ func startWeb(addr string, s *webServer) error {
 	mux.HandleFunc("/api/upload-dir", s.handleUploadToDir)
 	mux.HandleFunc("/api/reset", s.handleReset)
 	mux.HandleFunc("/api/transfer/cancel", s.handleTransferCancel)
+	mux.HandleFunc("/api/transfer/remove", s.handleTransferRemove)
 	return http.ListenAndServe(addr, mux)
 }
 
@@ -222,6 +224,7 @@ func (s *webServer) handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	files := r.MultipartForm.File["files"]
 	relpaths := r.MultipartForm.Value["relpaths"]
+	lastModified := r.MultipartForm.Value["lastModified"]
 	var texts []string
 	if t := r.FormValue("texts"); t != "" {
 		_ = json.Unmarshal([]byte(t), &texts)
@@ -248,6 +251,9 @@ func (s *webServer) handleUpload(w http.ResponseWriter, r *http.Request) {
 				f.Close()
 			}
 			src.Close()
+		}
+		if len(lastModified) > 0 {
+			applyLastModified(dst, lastModified[0])
 		}
 		writeJSON(w, map[string]any{"ok": true, "count": 1, "name": filepath.Base(dst)})
 		return
@@ -279,7 +285,13 @@ func (s *webServer) handleUpload(w http.ResponseWriter, r *http.Request) {
 		if name == "" {
 			name = sanitizeName(fh.Filename)
 		}
-		w2, err := zw.Create(name)
+		hdr := &zip.FileHeader{Name: name, Method: zip.Deflate}
+		if i < len(lastModified) {
+			if ms, err := strconv.ParseInt(strings.TrimSpace(lastModified[i]), 10, 64); err == nil && ms > 0 {
+				hdr.Modified = time.Unix(ms/1000, 0)
+			}
+		}
+		w2, err := zw.CreateHeader(hdr)
 		if err != nil {
 			continue
 		}
@@ -314,6 +326,7 @@ func (s *webServer) handleSend(w http.ResponseWriter, r *http.Request) {
 	}
 	files := r.MultipartForm.File["files"]
 	relpaths := r.MultipartForm.Value["relpaths"]
+	lastModified := r.MultipartForm.Value["lastModified"]
 	if targetsStr == "" || len(files) == 0 {
 		http.Error(w, "missing targets or files", http.StatusBadRequest)
 		return
@@ -367,6 +380,9 @@ func (s *webServer) handleSend(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(f, src)
 		f.Close()
 		src.Close()
+		if i < len(lastModified) {
+			applyLastModified(dst, lastModified[i])
+		}
 		items = append(items, sendItem{path: dst, relPath: rel, name: sanitizeName(fh.Filename)})
 	}
 
@@ -827,6 +843,21 @@ func (s *webServer) handleTransferCancel(w http.ResponseWriter, r *http.Request)
 	}
 }
 
+// handleTransferRemove 移除一条传输记录（前端「移除」失败任务，释放占用的进度条位置）。
+func (s *webServer) handleTransferRemove(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	id := r.URL.Query().Get("id")
+	if id == "" {
+		writeJSON(w, map[string]any{"ok": false, "error": "missing id"})
+		return
+	}
+	transfers.remove(id)
+	writeJSON(w, map[string]any{"ok": true})
+}
+
 // handleSettings 读取或更新配置（接收目录 + 缓存目录 + 自动保存开关 + 远程权限）。
 func (s *webServer) handleSettings(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
@@ -930,4 +961,14 @@ func (s *webServer) senderName(sid string) string {
 		return c.Name
 	}
 	return s.name
+}
+
+// applyLastModified 把表单里的 lastModified（毫秒时间戳）应用到文件，用于保留源文件修改时间。
+func applyLastModified(path, msStr string) {
+	ms, err := strconv.ParseInt(strings.TrimSpace(msStr), 10, 64)
+	if err != nil || ms <= 0 {
+		return
+	}
+	t := time.Unix(ms/1000, 0)
+	_ = os.Chtimes(path, t, t)
 }

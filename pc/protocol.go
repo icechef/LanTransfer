@@ -34,7 +34,8 @@ type Header struct {
 	Text       string `json:"text,omitempty"`
 	RelPath    string `json:"relPath,omitempty"`
 	MD5        string `json:"md5,omitempty"`    // file_end 时整文件 MD5（32 位小写 hex）
-	Offset     int64  `json:"offset,omitempty"` // ack 时告知已收字节数（断点续传）
+	Mtime      int64  `json:"mtime,omitempty"`  // file_meta 时源文件修改时间（Unix 秒）
+	Offset     int64  `json:"offset,omitempty"` // 已废弃（断点续传移除），仅向后兼容
 }
 
 func helloHeader(name, dtype string) Header {

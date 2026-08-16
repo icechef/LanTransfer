@@ -21,6 +21,7 @@ class ReceiveActionsReceiver : BroadcastReceiver() {
         const val EXTRA_REL_DIR = "rel_dir"
         const val EXTRA_FROM = "from"
         const val EXTRA_SIZE = "size"
+        const val EXTRA_MTIME = "mtime"
         private const val CHANNEL = "transfer_events"
         private var seq = 2000
     }
@@ -37,10 +38,11 @@ class ReceiveActionsReceiver : BroadcastReceiver() {
         val relDir = intent.getStringExtra(EXTRA_REL_DIR) ?: ""
         val from = intent.getStringExtra(EXTRA_FROM) ?: "未知设备"
         val size = intent.getLongExtra(EXTRA_SIZE, 0L)
+        val mtime = intent.getLongExtra(EXTRA_MTIME, 0L)
 
         when (intent.action) {
             ACTION_SAVE -> {
-                val uri = ReceiveStorage.savePending(context, cache, name, relDir)
+                val uri = ReceiveStorage.savePending(context, cache, name, relDir, mtime)
                 if (uri != null) {
                     HistoryStore.addFile(context, uri.toString(), name, size, from)
                     notifyResult(context, "已保存来自 $from 的文件", name, uri)

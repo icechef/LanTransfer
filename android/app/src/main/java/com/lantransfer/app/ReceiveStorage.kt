@@ -8,14 +8,14 @@ import android.os.Environment
 import android.provider.DocumentsContract
 import android.provider.MediaStore
 import java.io.File
-import java.io.InputStream
 import java.io.OutputStream
 import java.security.MessageDigest
 
 // 统一接收落盘：
-//  - 自动接收开：直接写 MediaStore Downloads（.part 临时条目，IS_PENDING，续传友好）或用户授权的 SAF 目录树。
+//  - 自动接收开：直接写 MediaStore Downloads（.part 临时条目，IS_PENDING）或用户授权的 SAF 目录树。
 //  - 自动接收关：先写到 app 缓存暂存，完成后通知里给「保存/拒绝」；保存时再拷贝到目标目录。
-// 接收方边写边算 MD5，file_end 时校验通过才 commit（.part → 最终名、清 IS_PENDING）。
+// 接收方边写边算 MD5，file_end 时校验通过才 commit（.part → 最终名、清 IS_PENDING、还原 mtime）。
+// 断点续传已移除：.part 仅作为「写完整才改名」的原子缓冲，连接断开即丢弃。
 object ReceiveStorage {
 
     class Target(
@@ -26,16 +26,17 @@ object ReceiveStorage {
         val pending: Boolean,
         val cacheFile: File?,      // pending 时的暂存文件
         val saf: Boolean,
-        val offset: Long,          // 实际续传起点（未续传为 0）
-        val digest: MessageDigest  // 流式 MD5，接收方边写边 update
+        val digest: MessageDigest, // 流式 MD5，接收方边写边 update
+        val mtime: Long            // 源文件修改时间（Unix 秒，0 表示未知）
     ) {
-        // 落盘完成（MD5 校验已通过）：.part → 最终名，清 pending
+        // 落盘完成（MD5 校验已通过）：.part → 最终名，清 pending，还原修改时间
         fun commit(ctx: Context) {
             if (pending || saf) return
             try {
                 val v = ContentValues().apply {
                     put(MediaStore.MediaColumns.DISPLAY_NAME, name)
                     put(MediaStore.MediaColumns.IS_PENDING, 0)
+                    if (mtime > 0) put(MediaStore.MediaColumns.DATE_MODIFIED, mtime)
                 }
                 ctx.contentResolver.update(uri!!, v, null, null)
             } catch (_: Exception) {}
@@ -55,12 +56,12 @@ object ReceiveStorage {
         }
     }
 
-    // 待确认保存：把暂存文件拷贝到目标目录，返回最终 uri
-    fun savePending(ctx: Context, cachePath: String, name: String, relDir: String): Uri? {
+    // 待确认保存：把暂存文件拷贝到目标目录，返回最终 uri；mtime 还原源文件修改时间
+    fun savePending(ctx: Context, cachePath: String, name: String, relDir: String, mtime: Long): Uri? {
         val src = File(cachePath)
         if (!src.exists()) return null
         return try {
-            val dst = open(ctx, name, relDir, false, 0L) ?: return null
+            val dst = open(ctx, name, relDir, false, mtime) ?: return null
             src.inputStream().use { input -> dst.out.use { o -> input.copyTo(o) } }
             dst.commit(ctx)
             val u = dst.uri
@@ -73,47 +74,7 @@ object ReceiveStorage {
         try { File(cachePath).delete() } catch (_: Exception) {}
     }
 
-    // 查找 MediaStore 里未完成（IS_PENDING）的同名 .part 条目的已写字节数；无则返回 0
-    fun findPartial(ctx: Context, name: String, relDir: String): Long {
-        if (SettingsStore.usingSaf(ctx)) return 0L
-        return try {
-            val base = Environment.DIRECTORY_DOWNLOADS
-            val sub = SettingsStore.receiveSubDir(ctx).trim()
-            val baseRel = if (sub.isEmpty()) base else "$base/$sub"
-            val rel = safeRel(relDir)
-            val fullRel = if (rel.isEmpty()) baseRel else "$baseRel/$rel"
-            val partName = safeName(name) + ".part"
-            val collection = MediaStore.Downloads.EXTERNAL_CONTENT_URI
-            val proj = arrayOf(MediaStore.MediaColumns._ID, MediaStore.MediaColumns.SIZE)
-            val sel = "${MediaStore.MediaColumns.DISPLAY_NAME}=? AND ${MediaStore.MediaColumns.IS_PENDING}=1"
-            ctx.contentResolver.query(collection, proj, sel, arrayOf(partName), null)?.use { c ->
-                if (c.moveToFirst()) {
-                    val id = c.getLong(0)
-                    val size = if (!c.isNull(1)) c.getLong(1) else 0L
-                    val uri = ContentUris.withAppendedId(collection, id)
-                    // 只认落在同一接收目录下的 .part
-                    if (partInDir(ctx, uri, fullRel)) size else 0L
-                } else 0L
-            } ?: 0L
-        } catch (_: Exception) { 0L }
-    }
-
-    // 校验某个 MediaStore 条目是否位于指定相对目录下
-    private fun partInDir(ctx: Context, uri: Uri, fullRel: String): Boolean {
-        return try {
-            val proj = arrayOf(MediaStore.MediaColumns.RELATIVE_PATH)
-            ctx.contentResolver.query(uri, proj, null, null, null)?.use { c ->
-                if (c.moveToFirst()) {
-                    val p = c.getString(0) ?: ""
-                    val want = fullRel.let { if (it.endsWith("/")) it else "$it/" }
-                    p.equals(want, ignoreCase = true)
-                } else false
-            } ?: false
-        } catch (_: Exception) { false }
-    }
-
-    // offset > 0 表示续传（MediaStore 已有未收满的 .part）
-    fun open(ctx: Context, name: String, relDir: String, pending: Boolean, offset: Long): Target? {
+    fun open(ctx: Context, name: String, relDir: String, pending: Boolean, mtime: Long): Target? {
         val safeName = safeName(name)
         val rel = safeRel(relDir)
         val digest = MessageDigest.getInstance("MD5")
@@ -123,17 +84,17 @@ object ReceiveStorage {
             if (!dir.exists()) dir.mkdirs()
             val f = File(dir, System.nanoTime().toString() + "_" + safeName)
             return try {
-                Target(null, f.outputStream(), safeName, rel, true, f, false, 0L, digest)
+                Target(null, f.outputStream(), safeName, rel, true, f, false, digest, mtime)
             } catch (_: Exception) { null }
         }
 
         if (SettingsStore.usingSaf(ctx)) {
-            return openSaf(ctx, safeName, rel, digest)
+            return openSaf(ctx, safeName, rel, digest, mtime)
         }
-        return openMediaStore(ctx, safeName, rel, offset, digest)
+        return openMediaStore(ctx, safeName, rel, digest, mtime)
     }
 
-    private fun openMediaStore(ctx: Context, name: String, rel: String, offset: Long, digest: MessageDigest): Target? {
+    private fun openMediaStore(ctx: Context, name: String, rel: String, digest: MessageDigest, mtime: Long): Target? {
         return try {
             val base = Environment.DIRECTORY_DOWNLOADS
             val sub = SettingsStore.receiveSubDir(ctx).trim()
@@ -141,56 +102,21 @@ object ReceiveStorage {
             val fullRel = if (rel.isEmpty()) baseRel else "$baseRel/$rel"
             val partName = name + ".part"
 
-            var actualOffset = offset
-            var uri: Uri? = null
-            if (offset > 0) {
-                uri = findPartUri(ctx, partName, fullRel)
+            // 清理同名残留 .part（旧失败遗留），再新建
+            deleteParts(ctx, partName, fullRel)
+            val values = ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, partName)
+                put(MediaStore.MediaColumns.MIME_TYPE, "application/octet-stream")
+                put(MediaStore.MediaColumns.RELATIVE_PATH, fullRel)
+                put(MediaStore.MediaColumns.IS_PENDING, 1)
             }
-            if (uri == null) {
-                actualOffset = 0L
-                // 清理同名残留 .part（旧失败遗留），再新建
-                deleteParts(ctx, partName, fullRel)
-                val values = ContentValues().apply {
-                    put(MediaStore.MediaColumns.DISPLAY_NAME, partName)
-                    put(MediaStore.MediaColumns.MIME_TYPE, "application/octet-stream")
-                    put(MediaStore.MediaColumns.RELATIVE_PATH, fullRel)
-                    put(MediaStore.MediaColumns.IS_PENDING, 1)
+            val uri = ctx.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: return null
+            val o = ctx.contentResolver.openOutputStream(uri, "w")
+                ?: run {
+                    try { ctx.contentResolver.delete(uri, null, null) } catch (_: Exception) {}
+                    return null
                 }
-                uri = ctx.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: return null
-            }
-
-            // 续传：预 hash 已有前缀
-            if (actualOffset > 0) {
-                ctx.contentResolver.openInputStream(uri)?.use { hashInto(digest, it) }
-            }
-
-            val o = if (actualOffset > 0) {
-                ctx.contentResolver.openOutputStream(uri, "wa")
-            } else {
-                ctx.contentResolver.openOutputStream(uri, "w")
-            }
-            if (o == null) {
-                // 追加失败则删掉 .part，让下次从 0 重传
-                if (actualOffset > 0) try { ctx.contentResolver.delete(uri, null, null) } catch (_: Exception) {}
-                else try { ctx.contentResolver.delete(uri, null, null) } catch (_: Exception) {}
-                return null
-            }
-            Target(uri, o, name, rel, false, null, false, actualOffset, digest)
-        } catch (_: Exception) { null }
-    }
-
-    private fun findPartUri(ctx: Context, partName: String, fullRel: String): Uri? {
-        return try {
-            val collection = MediaStore.Downloads.EXTERNAL_CONTENT_URI
-            val proj = arrayOf(MediaStore.MediaColumns._ID)
-            val sel = "${MediaStore.MediaColumns.DISPLAY_NAME}=? AND ${MediaStore.MediaColumns.IS_PENDING}=1"
-            ctx.contentResolver.query(collection, proj, sel, arrayOf(partName), null)?.use { c ->
-                if (c.moveToFirst()) {
-                    val id = c.getLong(0)
-                    val uri = ContentUris.withAppendedId(collection, id)
-                    if (partInDir(ctx, uri, fullRel)) uri else null
-                } else null
-            }
+            Target(uri, o, name, rel, false, null, false, digest, mtime)
         } catch (_: Exception) { null }
     }
 
@@ -211,16 +137,21 @@ object ReceiveStorage {
         } catch (_: Exception) {}
     }
 
-    private fun hashInto(digest: MessageDigest, input: InputStream) {
-        val buf = ByteArray(1 shl 20)
-        while (true) {
-            val n = input.read(buf)
-            if (n <= 0) break
-            digest.update(buf, 0, n)
-        }
+    // 校验某个 MediaStore 条目是否位于指定相对目录下
+    private fun partInDir(ctx: Context, uri: Uri, fullRel: String): Boolean {
+        return try {
+            val proj = arrayOf(MediaStore.MediaColumns.RELATIVE_PATH)
+            ctx.contentResolver.query(uri, proj, null, null, null)?.use { c ->
+                if (c.moveToFirst()) {
+                    val p = c.getString(0) ?: ""
+                    val want = fullRel.let { if (it.endsWith("/")) it else "$it/" }
+                    p.equals(want, ignoreCase = true)
+                } else false
+            } ?: false
+        } catch (_: Exception) { false }
     }
 
-    private fun openSaf(ctx: Context, name: String, rel: String, digest: MessageDigest): Target? {
+    private fun openSaf(ctx: Context, name: String, rel: String, digest: MessageDigest, mtime: Long): Target? {
         return try {
             val treeUri = Uri.parse(SettingsStore.safTreeUri(ctx))
             val rootId = DocumentsContract.getTreeDocumentId(treeUri)
@@ -231,7 +162,7 @@ object ReceiveStorage {
             ) ?: return null
             val o = ctx.contentResolver.openOutputStream(docUri)
                 ?: run { DocumentsContract.deleteDocument(ctx.contentResolver, docUri); return null }
-            Target(docUri, o, name, rel, false, null, true, 0L, digest)
+            Target(docUri, o, name, rel, false, null, true, digest, mtime)
         } catch (_: Exception) { null }
     }
 

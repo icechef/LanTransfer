@@ -563,8 +563,10 @@ function renderProgress(running, failed) {
     const dir = t.dir === 'send' ? '发送' : '接收';
     const msg = t.error === 'cancelled' ? '已取消' : (t.error || '失败');
     html += '<div class="prog"><div class="ph"><span>'+escapeHtml(dir+' '+t.name+'：'+msg)+'</span></div>' +
-      (retryMap[t.id] ? '<button class="small" style="margin-top:6px;" data-retry="'+t.id+'">重试</button>' : '') +
-      '</div>';
+      '<div style="margin-top:6px;display:flex;gap:8px;">' +
+      (retryMap[t.id] ? '<button class="small" data-retry="'+t.id+'">重试</button>' : '') +
+      '<button class="small danger" data-remove="'+t.id+'">移除</button>' +
+      '</div></div>';
   });
   if (html) { $('progressCard').style.display = ''; $('progressList').innerHTML = html; bindProgressButtons(); }
   else $('progressCard').style.display = 'none';
@@ -583,12 +585,19 @@ function bindProgressButtons() {
       if (r) sendFilesTo(r.targets, r.files);
     };
   });
+  document.querySelectorAll('#progressList button[data-remove]').forEach(b => {
+    b.onclick = async () => {
+      await fetch('/api/transfer/remove?id='+encodeURIComponent(b.dataset.remove), { method:'POST' });
+      delete retryMap[b.dataset.remove];
+      loadTransfers();
+    };
+  });
 }
 async function loadTransfers() {
   try {
     const r = await fetch('/api/transfers'); const list = await r.json();
     const running = list.filter(t => t.status === 'running');
-    const failed = list.filter(t => t.status === 'error' && retryMap[t.id]);
+    const failed = list.filter(t => t.status === 'error');
     list.forEach(t => {
       if (activeTasks[t.id] && t.status !== 'running') {
         if (t.status === 'done') toast((t.dir==='send'?'发送':'接收')+'完成：'+t.name);
@@ -606,7 +615,7 @@ async function sendFilesTo(targets, files) {
   const fd = new FormData();
   fd.append('targets', targets.join(','));
   fd.append('fromSid', mySid);
-  files.forEach(f => { fd.append('files', f.file, f.name); fd.append('relpaths', f.rel); });
+  files.forEach(f => { fd.append('files', f.file, f.name); fd.append('relpaths', f.rel); fd.append('lastModified', f.file.lastModified || ''); });
 
   const xhr = new XMLHttpRequest();
   xhr.open('POST', '/api/send');
@@ -696,7 +705,7 @@ $('uploadBtn').onclick = async () => {
   const texts = [];
   pendingUpload.forEach(p => {
     if (p.kind === 'text') texts.push(p.text);
-    else { fd.append('files', p.file, p.file.name); fd.append('relpaths', p.rel); }
+    else { fd.append('files', p.file, p.file.name); fd.append('relpaths', p.rel); fd.append('lastModified', p.file.lastModified || ''); }
   });
   if (texts.length) fd.append('texts', JSON.stringify(texts));
   toast('上传中…');
@@ -712,7 +721,7 @@ $('uploadEachBtn').onclick = async () => {
   for (const p of pendingUpload) {
     const fd = new FormData();
     if (p.kind === 'text') fd.append('texts', JSON.stringify([p.text]));
-    else { fd.append('files', p.file, p.file.name); fd.append('relpaths', p.rel); }
+    else { fd.append('files', p.file, p.file.name); fd.append('relpaths', p.rel); fd.append('lastModified', p.file.lastModified || ''); }
     try {
       const r = await fetch('/api/upload', { method:'POST', body:fd });
       const d = await r.json();

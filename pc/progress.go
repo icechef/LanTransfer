@@ -74,6 +74,22 @@ func (tr *transferRegistry) cancel(id string) bool {
 	}
 }
 
+// remove 从列表移除一个任务（用于前端「移除」失败的传输记录）。
+func (tr *transferRegistry) remove(id string) {
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	if _, ok := tr.items[id]; !ok {
+		return
+	}
+	delete(tr.items, id)
+	for i, x := range tr.order {
+		if x == id {
+			tr.order = append(tr.order[:i], tr.order[i+1:]...)
+			break
+		}
+	}
+}
+
 // cancelChan 返回任务的取消通道（不存在则返回 nil）。
 func (tr *transferRegistry) cancelChan(id string) <-chan struct{} {
 	tr.mu.Lock()

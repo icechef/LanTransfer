@@ -113,14 +113,19 @@ func receiveLoop(conn net.Conn, peerName string) {
 	var f *os.File
 	var size, written int64
 	var taskID string
+	var mtime int64
 	var hash hash.Hash
 	var partPath, finalPath string
 
 	for {
+		// 读超时：发送端长时间停滞（断网/挂起）时及时释放连接与临时文件
+		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Minute))
 		h, payload, err := readFrame(conn)
 		if err != nil {
 			if f != nil {
 				_ = f.Close()
+				f = nil
+				_ = os.Remove(partPath) // 断点续传已移除：断连即丢弃半成品
 			}
 			return
 		}
@@ -132,6 +137,7 @@ func receiveLoop(conn net.Conn, peerName string) {
 			if f != nil {
 				_ = f.Close()
 				f = nil
+				_ = os.Remove(partPath) // 前一个未收完的文件被新 file_meta 取代
 			}
 			cfg := getConfig()
 			dir := cfg.ReceiveDir
@@ -152,32 +158,19 @@ func receiveLoop(conn net.Conn, peerName string) {
 			}
 			finalPath = filepath.Join(dir, name) // 重传同名文件直接覆盖，不再加 (1) 后缀
 			partPath = finalPath + ".part"
+			mtime = h.Mtime
 			hash = md5.New()
 			written = 0
-			// 断点续传：已有未收满的 .part 则追加续写，否则新建（清空重写）
-			if st, err := os.Stat(partPath); err == nil && st.Size() < h.FileSize {
-				nf, err := os.OpenFile(partPath, os.O_WRONLY|os.O_APPEND, 0o644)
-				if err != nil {
-					_ = writeFrame(conn, Header{Type: "error", Message: err.Error()}, nil)
-					return
-				}
-				f = nf
-				if pf, err := os.Open(partPath); err == nil {
-					_, _ = io.Copy(hash, pf)
-					_ = pf.Close()
-				}
-				written = st.Size()
-			} else {
-				nf, err := os.Create(partPath)
-				if err != nil {
-					_ = writeFrame(conn, Header{Type: "error", Message: err.Error()}, nil)
-					return
-				}
-				f = nf
+			// 断点续传已移除：总是新建 .part 覆盖重写
+			nf, err := os.Create(partPath)
+			if err != nil {
+				_ = writeFrame(conn, Header{Type: "error", Message: err.Error()}, nil)
+				return
 			}
+			f = nf
 			size = h.FileSize
 			taskID = transfers.create("receive", name, peerName, h.FileSize).ID
-			if err := writeFrame(conn, Header{Type: "ack", Offset: written}, nil); err != nil {
+			if err := writeFrame(conn, Header{Type: "ack"}, nil); err != nil {
 				return
 			}
 
@@ -221,6 +214,10 @@ func receiveLoop(conn net.Conn, peerName string) {
 					_ = writeFrame(conn, Header{Type: "error", Message: err.Error()}, nil)
 					return
 				}
+				// 还原源文件的修改日期
+				if mtime > 0 {
+					_ = os.Chtimes(finalPath, time.Unix(mtime, 0), time.Unix(mtime, 0))
+				}
 			}
 			transfers.finish(taskID, "done", "")
 			if err := writeFrame(conn, Header{Type: "ack"}, nil); err != nil {
@@ -253,6 +250,7 @@ func sendBatch(target, selfName, selfType string, items []sendItem, onProgress f
 	if err := writeFrame(conn, helloHeader(selfName, selfType), nil); err != nil {
 		return err
 	}
+	_ = conn.SetDeadline(time.Now().Add(15 * time.Second))
 	if _, _, err := readFrame(conn); err != nil {
 		return err
 	}
@@ -299,6 +297,7 @@ func sendText(target, selfName, selfType, text string) error {
 	if err := writeFrame(conn, helloHeader(selfName, selfType), nil); err != nil {
 		return err
 	}
+	_ = conn.SetDeadline(time.Now().Add(15 * time.Second))
 	if _, _, err := readFrame(conn); err != nil {
 		return err
 	}
@@ -321,10 +320,12 @@ func sendOne(conn net.Conn, it sendItem, fi, total int, onProgress func(int64), 
 	}
 	fileID := strconv.Itoa(fi)
 
-	meta := Header{Type: "file_meta", FileID: fileID, FileName: name, FileSize: st.Size(), FileIndex: fi, FileCount: total, RelPath: it.relPath}
+	meta := Header{Type: "file_meta", FileID: fileID, FileName: name, FileSize: st.Size(), FileIndex: fi, FileCount: total, RelPath: it.relPath, Mtime: st.ModTime().Unix()}
+	_ = conn.SetDeadline(time.Now().Add(60 * time.Second))
 	if err := writeFrame(conn, meta, nil); err != nil {
 		return err
 	}
+	_ = conn.SetDeadline(time.Now().Add(60 * time.Second))
 	ackH, _, err := readFrame(conn)
 	if err != nil {
 		return err
@@ -334,21 +335,6 @@ func sendOne(conn net.Conn, it sendItem, fi, total int, onProgress func(int64), 
 	}
 
 	hash := md5.New()
-	var offset int64
-	if ackH.Offset > 0 && ackH.Offset < st.Size() {
-		offset = ackH.Offset
-		// 补算 [0, offset) 的 MD5 前缀，再从断点续发
-		if _, err := f.Seek(0, io.SeekStart); err != nil {
-			return err
-		}
-		if _, err := io.CopyN(hash, f, offset); err != nil {
-			return err
-		}
-		if _, err := f.Seek(offset, io.SeekStart); err != nil {
-			return err
-		}
-	}
-
 	buf := make([]byte, chunkSize)
 	var idx int64
 	var sent int64
@@ -363,6 +349,8 @@ func sendOne(conn net.Conn, it sendItem, fi, total int, onProgress func(int64), 
 		}
 		n, rerr := f.Read(buf)
 		if n > 0 {
+			// 写超时：断网/对端停滞时快速失败，避免进度条卡死
+			_ = conn.SetDeadline(time.Now().Add(60 * time.Second))
 			if err := writeFrame(conn, Header{Type: "file_data", FileID: fileID, ChunkIndex: idx}, buf[:n]); err != nil {
 				return err
 			}
@@ -381,9 +369,11 @@ func sendOne(conn net.Conn, it sendItem, fi, total int, onProgress func(int64), 
 		}
 	}
 
+	_ = conn.SetDeadline(time.Now().Add(60 * time.Second))
 	if err := writeFrame(conn, Header{Type: "file_end", FileID: fileID, TotalBytes: st.Size(), MD5: hex.EncodeToString(hash.Sum(nil))}, nil); err != nil {
 		return err
 	}
+	_ = conn.SetDeadline(time.Now().Add(60 * time.Second))
 	if h, _, err := readFrame(conn); err != nil {
 		return err
 	} else if h.Type == "error" {

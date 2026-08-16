@@ -43,6 +43,10 @@
             android:name=".PcFilesActivity"
             android:exported="false" />
 
+        <activity
+            android:name=".SyncActivity"
+            android:exported="false" />
+
         <receiver
             android:name=".ClipboardReceiver"
             android:exported="false" />

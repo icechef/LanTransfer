@@ -15,6 +15,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
 import android.provider.DocumentsContract
+import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.view.View
 import android.view.ViewGroup
@@ -36,7 +37,7 @@ import java.net.Socket
 import java.security.MessageDigest
 import java.util.concurrent.Executors
 
-data class PendingFile(val uri: Uri, val name: String, val size: Long, val relPath: String)
+data class PendingFile(val uri: Uri, val name: String, val size: Long, val relPath: String, val mtime: Long = 0)
 
 class MainActivity : AppCompatActivity() {
 
@@ -97,6 +98,12 @@ class MainActivity : AppCompatActivity() {
                     renderReceiveProgress()
                     showBanner("收到来自 $from 的文件", "$name（点击打开）", autoHide = true) { openUri(uri) }
                 }
+                TransferService.ACTION_RECEIVE_END -> {
+                    // 接收结束（失败/取消/断连）：移除对应任务，避免进度条常驻
+                    val taskId = intent.getIntExtra("taskId", -1)
+                    receiveTasks.remove(taskId)
+                    renderReceiveProgress()
+                }
                 TransferService.ACTION_TEXT -> {
                     val from = intent.getStringExtra("from") ?: ""
                     val text = intent.getStringExtra("text") ?: ""
@@ -155,6 +162,9 @@ class MainActivity : AppCompatActivity() {
         findViewById<Button>(R.id.settingsBtn).setOnClickListener {
             startActivity(Intent(this, SettingsActivity::class.java))
         }
+        findViewById<Button>(R.id.syncBtn).setOnClickListener {
+            startActivity(Intent(this, SyncActivity::class.java))
+        }
         findViewById<Button>(R.id.historyBtn).setOnClickListener {
             startActivity(Intent(this, HistoryActivity::class.java))
         }
@@ -174,6 +184,7 @@ class MainActivity : AppCompatActivity() {
         val filter = IntentFilter().apply {
             addAction(TransferService.ACTION_RECEIVED)
             addAction(TransferService.ACTION_RECEIVE_PROGRESS)
+            addAction(TransferService.ACTION_RECEIVE_END)
             addAction(TransferService.ACTION_TEXT)
             addAction(TransferService.ACTION_PEER_FOUND)
         }
@@ -446,15 +457,18 @@ class MainActivity : AppCompatActivity() {
     private fun resolveFile(uri: Uri): PendingFile {
         var name = "file"
         var size = 0L
+        var mtime = 0L
         contentResolver.query(uri, null, null, null, null)?.use { c ->
             if (c.moveToFirst()) {
                 val ni = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
                 if (ni >= 0) name = c.getString(ni) ?: name
                 val si = c.getColumnIndex(OpenableColumns.SIZE)
                 if (si >= 0 && !c.isNull(si)) size = c.getLong(si)
+                val mi = c.getColumnIndex(MediaStore.MediaColumns.DATE_MODIFIED)
+                if (mi >= 0 && !c.isNull(mi)) mtime = c.getLong(mi)
             }
         }
-        return PendingFile(uri, name, size, "")
+        return PendingFile(uri, name, size, "", mtime)
     }
 
     private fun listFolder(treeUri: Uri, docId: String, relPrefix: String): List<PendingFile> {
@@ -464,24 +478,27 @@ class MainActivity : AppCompatActivity() {
             DocumentsContract.Document.COLUMN_DOCUMENT_ID,
             DocumentsContract.Document.COLUMN_DISPLAY_NAME,
             DocumentsContract.Document.COLUMN_MIME_TYPE,
-            DocumentsContract.Document.COLUMN_SIZE
+            DocumentsContract.Document.COLUMN_SIZE,
+            DocumentsContract.Document.COLUMN_LAST_MODIFIED
         )
         contentResolver.query(children, cols, null, null, null)?.use { c ->
             val idIdx = c.getColumnIndex(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
             val nameIdx = c.getColumnIndex(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
             val mimeIdx = c.getColumnIndex(DocumentsContract.Document.COLUMN_MIME_TYPE)
             val sizeIdx = c.getColumnIndex(DocumentsContract.Document.COLUMN_SIZE)
+            val mtimeIdx = c.getColumnIndex(DocumentsContract.Document.COLUMN_LAST_MODIFIED)
             while (c.moveToNext()) {
                 val id = c.getString(idIdx)
                 val name = c.getString(nameIdx) ?: continue
                 val mime = c.getString(mimeIdx)
                 val size = if (sizeIdx >= 0 && !c.isNull(sizeIdx)) c.getLong(sizeIdx) else 0L
+                val mtime = if (mtimeIdx >= 0 && !c.isNull(mtimeIdx)) c.getLong(mtimeIdx) / 1000 else 0L
                 val fullRel = if (relPrefix.isEmpty()) name else "$relPrefix/$name"
                 if (mime == DocumentsContract.Document.MIME_TYPE_DIR) {
                     out.addAll(listFolder(treeUri, id, fullRel))
                 } else {
                     val docUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, id)
-                    out.add(PendingFile(docUri, name, size, fullRel))
+                    out.add(PendingFile(docUri, name, size, fullRel, mtime))
                 }
             }
         }
@@ -512,6 +529,7 @@ class MainActivity : AppCompatActivity() {
             var ok = 0
             var fail = 0
             var cancelled = false
+            val lastUi = longArrayOf(0L) // 节流：避免逐块刷 UI 造成卡顿
             runOnUiThread { showProgress() }
             for (t in targets) {
                 if (sendCancelled) { cancelled = true; break }
@@ -522,8 +540,12 @@ class MainActivity : AppCompatActivity() {
                     } else {
                         sendToTarget(t.addr, files) { n ->
                             doneHolder[0] = base + n
-                            val d = doneHolder[0]
-                            runOnUiThread { updateProgress(d, grandTotal, startAt) }
+                            val now = SystemClock.elapsedRealtime()
+                            if (now - lastUi[0] >= 100 || doneHolder[0] >= grandTotal) {
+                                lastUi[0] = now
+                                val d = doneHolder[0]
+                                runOnUiThread { updateProgress(d, grandTotal, startAt) }
+                            }
                         }
                         true
                     }
@@ -566,13 +588,14 @@ class MainActivity : AppCompatActivity() {
         try {
             s.connect(InetSocketAddress(host, port), 3000)
             s.tcpNoDelay = false
+            s.soTimeout = 30000
             val out = s.getOutputStream()
             val input = s.getInputStream()
             Protocol.write(out, Protocol.hello(SettingsStore.deviceName(this), "Android"))
             if (Protocol.read(input) == null) throw RuntimeException("握手失败")
             var sent = 0L
             for ((index, f) in files.withIndex()) {
-                sendOne(out, input, f, index, files.size)
+                sendOne(out, input, f, index, files.size) { n -> onProgress(sent + n) }
                 sent += f.size
                 onProgress(sent)
             }
@@ -581,7 +604,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun sendOne(out: OutputStream, input: InputStream, f: PendingFile, index: Int, total: Int) {
+    private fun sendOne(out: OutputStream, input: InputStream, f: PendingFile, index: Int, total: Int, onChunk: (Long) -> Unit) {
         val meta = Protocol.Header().apply {
             type = "file_meta"
             fileId = index.toString()
@@ -590,29 +613,19 @@ class MainActivity : AppCompatActivity() {
             fileIndex = index
             fileCount = total
             relPath = f.relPath.takeIf { it.isNotEmpty() }
+            mtime = f.mtime
         }
         Protocol.write(out, meta)
         val ack = Protocol.read(input)
         if (ack != null && ack.first.type == "error") throw RuntimeException(ack.first.message)
 
         val digest = MessageDigest.getInstance("MD5")
-        val offset = ack?.first?.offset ?: 0L
 
         contentResolver.openInputStream(f.uri)!!.use { fin ->
-            // 续传：跳过并 hash 前缀
-            if (offset > 0) {
-                val skipBuf = ByteArray(1 shl 20)
-                var remaining = offset
-                while (remaining > 0) {
-                    val n = fin.read(skipBuf, 0, minOf(skipBuf.size.toLong(), remaining).toInt())
-                    if (n <= 0) break
-                    digest.update(skipBuf, 0, n)
-                    remaining -= n
-                }
-            }
-            // 发送剩余部分（边发边 hash）
+            // 断点续传已移除：总是从文件头逐块发送
             val buf = ByteArray(1 shl 20)
             var idx = 0L
+            var sent = 0L
             while (true) {
                 if (sendCancelled) throw RuntimeException("cancelled")
                 val n = fin.read(buf)
@@ -623,6 +636,8 @@ class MainActivity : AppCompatActivity() {
                 }, chunk)
                 digest.update(chunk)
                 idx++
+                sent += n
+                onChunk(sent)  // 逐块回调，进度条实时更新
             }
         }
 
