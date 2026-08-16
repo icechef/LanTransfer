@@ -35,6 +35,8 @@
 | `fileIndex` / `fileCount` | int | 第几个文件 / 总文件数（进度展示用） |
 | `message` | string | 错误信息等 |
 | `port` | int | 对端监听端口 |
+| `md5` | string | `file_end` 时整文件 MD5（32 位小写 hex，用于校验和） |
+| `offset` | int64 | `ack` 时告知已收字节数（断点续传起点，0 或缺省 = 从头发） |
 
 ## 消息类型
 
@@ -43,7 +45,7 @@
 | `hello` | 双向 | 连接建立后**双方立即各发一条**，携带自身设备信息（握手/发现）。之后按需关闭或继续传输 |
 | `file_meta` | 发→收 | 文件元数据，接收方准备落盘后回 `ack` |
 | `file_data` | 发→收 | 文件块（1 MiB，最后一块可小于），payload 为块内容 |
-| `file_end` | 发→收 | 单文件结束，携带 `totalBytes`，接收方校验后回 `ack` |
+| `file_end` | 发→收 | 单文件结束，携带 `totalBytes` 与 `md5`（整文件校验和），接收方校验后回 `ack` |
 | `ack` | 双向 | 确认 |
 | `error` | 双向 | 出错，`message` 携带原因 |
 
@@ -71,11 +73,17 @@ close
 ```
 accept → hello ↔ hello
 loop:
-  file_meta → 创建文件（重名加后缀）→ ack
-  file_data → 写入文件
-  file_end → 校验字节数 → ack
+  file_meta → 落盘（存在同名 .part 且未收完则续传，回 ack{offset}）→ ack
+  file_data → 写入文件（边写边算 MD5）
+  file_end → 校验字节数 + MD5 → 通过则改名落盘并 ack，否则删 .part 回 error
 close
 ```
+
+### 断点续传与校验
+
+- 接收端以 `<最终文件名>.part` 落盘，`file_meta` 时若该 `.part` 已存在且未收满，回 `ack{offset=已收字节}`，发送端从 `offset` 起续发。
+- 两端都流式计算整文件 MD5，发送端在 `file_end` 携带，接收端比对；不一致视为损坏（删除 `.part` 并回 `error`）。
+- 向后兼容：`file_end` 缺 `md5` 时跳过校验，`ack` 缺 `offset` 时从头发送。
 
 ## 说明
 

@@ -33,6 +33,7 @@ import java.io.InputStream
 import java.io.OutputStream
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.security.MessageDigest
 import java.util.concurrent.Executors
 
 data class PendingFile(val uri: Uri, val name: String, val size: Long, val relPath: String)
@@ -556,7 +557,22 @@ class MainActivity : AppCompatActivity() {
         val ack = Protocol.read(input)
         if (ack != null && ack.first.type == "error") throw RuntimeException(ack.first.message)
 
+        val digest = MessageDigest.getInstance("MD5")
+        val offset = ack?.first?.offset ?: 0L
+
         contentResolver.openInputStream(f.uri)!!.use { fin ->
+            // 续传：跳过并 hash 前缀
+            if (offset > 0) {
+                val skipBuf = ByteArray(1 shl 20)
+                var remaining = offset
+                while (remaining > 0) {
+                    val n = fin.read(skipBuf, 0, minOf(skipBuf.size.toLong(), remaining).toInt())
+                    if (n <= 0) break
+                    digest.update(skipBuf, 0, n)
+                    remaining -= n
+                }
+            }
+            // 发送剩余部分（边发边 hash）
             val buf = ByteArray(1 shl 20)
             var idx = 0L
             while (true) {
@@ -566,12 +582,14 @@ class MainActivity : AppCompatActivity() {
                 Protocol.write(out, Protocol.Header().apply {
                     type = "file_data"; fileId = index.toString(); chunkIndex = idx
                 }, chunk)
+                digest.update(chunk)
                 idx++
             }
         }
 
+        val md5hex = digest.digest().joinToString("") { String.format("%02x", it.toInt() and 0xFF) }
         Protocol.write(out, Protocol.Header().apply {
-            type = "file_end"; fileId = index.toString(); totalBytes = f.size
+            type = "file_end"; fileId = index.toString(); totalBytes = f.size; md5 = md5hex
         })
         val ack2 = Protocol.read(input)
         if (ack2 != null && ack2.first.type == "error") throw RuntimeException(ack2.first.message)

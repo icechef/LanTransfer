@@ -485,6 +485,9 @@ func listDirFiles(dir, source string) []fileEntry {
 		if e.IsDir() {
 			continue
 		}
+		if strings.HasSuffix(e.Name(), ".part") {
+			continue
+		}
 		info, err := e.Info()
 		if err != nil {
 			continue
@@ -770,6 +773,9 @@ func (s *webServer) handlePending(w http.ResponseWriter, r *http.Request) {
 	files := make([]fileEntry, 0)
 	for _, e := range entries {
 		if e.IsDir() {
+			continue
+		}
+		if strings.HasSuffix(e.Name(), ".part") {
 			continue
 		}
 		info, err := e.Info()

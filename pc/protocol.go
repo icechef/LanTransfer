@@ -33,6 +33,8 @@ type Header struct {
 	IP         string `json:"ip,omitempty"`
 	Text       string `json:"text,omitempty"`
 	RelPath    string `json:"relPath,omitempty"`
+	MD5        string `json:"md5,omitempty"`    // file_end 时整文件 MD5（32 位小写 hex）
+	Offset     int64  `json:"offset,omitempty"` // ack 时告知已收字节数（断点续传）
 }
 
 func helloHeader(name, dtype string) Header {

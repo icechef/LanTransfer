@@ -15,6 +15,7 @@ import android.os.PowerManager
 import android.os.SystemClock
 import java.net.ServerSocket
 import java.net.Socket
+import java.security.MessageDigest
 import java.util.concurrent.atomic.AtomicInteger
 
 class TransferService : Service() {
@@ -138,6 +139,7 @@ class TransferService : Service() {
             var lastSpeedTime = 0L
             var lastSpeedWritten = 0L
             var taskId = 0
+            var digest: MessageDigest? = null
 
             while (true) {
                 val fr = Protocol.read(input) ?: break
@@ -155,11 +157,16 @@ class TransferService : Service() {
                         val name = if (rel.contains('/')) rel.substringAfterLast('/') else (h.fileName ?: "file.bin")
                         currentName = name
                         currentSize = h.fileSize
-                        written = 0L
                         lastSpeedTime = 0L
                         lastSpeedWritten = 0L
                         taskId = nextNotifId()
-                        val created = ReceiveStorage.open(this, name, relDir, !SettingsStore.autoSave(this))
+
+                        // 断点续传：MediaStore 下查已有未收满的 .part
+                        val pending = !SettingsStore.autoSave(this)
+                        var offset = if (!pending) ReceiveStorage.findPartial(this, name, relDir) else 0L
+                        if (offset >= currentSize) offset = 0L
+
+                        val created = ReceiveStorage.open(this, name, relDir, pending, offset)
                         if (created == null) {
                             Protocol.write(out, Protocol.Header().apply {
                                 type = "error"; message = "create file failed"
@@ -168,13 +175,16 @@ class TransferService : Service() {
                             return
                         }
                         target = created
-                        reportProgress(taskId, fromName, name, currentSize, 0, 0.0)
-                        Protocol.write(out, Protocol.Header().apply { type = "ack" })
+                        digest = created.digest
+                        written = created.offset
+                        reportProgress(taskId, fromName, name, currentSize, written, 0.0)
+                        Protocol.write(out, Protocol.Header().apply { type = "ack"; offset = created.offset })
                     }
 
                     "file_data" -> {
                         if (target != null && payload != null) {
                             target.out.write(payload)
+                            digest?.update(payload)
                             written += payload.size
                             val now = SystemClock.elapsedRealtime()
                             if (now - lastNotify >= 200) {
@@ -200,6 +210,19 @@ class TransferService : Service() {
                                     type = "error"; message = "size mismatch"
                                 })
                                 return
+                            }
+                            // MD5 校验（发送端未携带则跳过，向后兼容）
+                            val expected = h.md5
+                            if (!expected.isNullOrEmpty()) {
+                                val got = digest?.digest()?.joinToString("") { String.format("%02x", it.toInt() and 0xFF) }
+                                if (got == null || !got.equals(expected, ignoreCase = true)) {
+                                    t.discard(this)
+                                    postFailure(currentName, "校验和不匹配")
+                                    Protocol.write(out, Protocol.Header().apply {
+                                        type = "error"; message = "md5 mismatch"
+                                    })
+                                    return
+                                }
                             }
                             if (t.pending) {
                                 postPending(fromName, currentName, t.cacheFile!!.absolutePath, t.relDir, currentSize)

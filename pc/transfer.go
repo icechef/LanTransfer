@@ -1,8 +1,11 @@
 package main
 
 import (
+	"crypto/md5"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"net"
 	"os"
@@ -110,6 +113,8 @@ func receiveLoop(conn net.Conn, peerName string) {
 	var f *os.File
 	var size, written int64
 	var taskID string
+	var hash hash.Hash
+	var partPath, finalPath string
 
 	for {
 		h, payload, err := readFrame(conn)
@@ -145,17 +150,34 @@ func receiveLoop(conn net.Conn, peerName string) {
 					name = sanitizeName(filepath.Base(rel))
 				}
 			}
-			path := uniquePath(filepath.Join(dir, name))
-			nf, err := os.Create(path)
-			if err != nil {
-				_ = writeFrame(conn, Header{Type: "error", Message: err.Error()}, nil)
-				return
-			}
-			f = nf
-			size = h.FileSize
+			finalPath = uniquePath(filepath.Join(dir, name))
+			partPath = finalPath + ".part"
+			hash = md5.New()
 			written = 0
+			// 断点续传：已有未收满的 .part 则追加续写，否则新建（清空重写）
+			if st, err := os.Stat(partPath); err == nil && st.Size() < h.FileSize {
+				nf, err := os.OpenFile(partPath, os.O_WRONLY|os.O_APPEND, 0o644)
+				if err != nil {
+					_ = writeFrame(conn, Header{Type: "error", Message: err.Error()}, nil)
+					return
+				}
+				f = nf
+				if pf, err := os.Open(partPath); err == nil {
+					_, _ = io.Copy(hash, pf)
+					_ = pf.Close()
+				}
+				written = st.Size()
+			} else {
+				nf, err := os.Create(partPath)
+				if err != nil {
+					_ = writeFrame(conn, Header{Type: "error", Message: err.Error()}, nil)
+					return
+				}
+				f = nf
+			}
+			size = h.FileSize
 			taskID = transfers.create("receive", name, peerName, h.FileSize).ID
-			if err := writeFrame(conn, Header{Type: "ack"}, nil); err != nil {
+			if err := writeFrame(conn, Header{Type: "ack", Offset: written}, nil); err != nil {
 				return
 			}
 
@@ -164,6 +186,9 @@ func receiveLoop(conn net.Conn, peerName string) {
 				if _, err := f.Write(payload); err != nil {
 					_ = writeFrame(conn, Header{Type: "error", Message: err.Error()}, nil)
 					return
+				}
+				if hash != nil {
+					_, _ = hash.Write(payload)
 				}
 				written += int64(len(payload))
 				transfers.update(taskID, written)
@@ -174,8 +199,24 @@ func receiveLoop(conn net.Conn, peerName string) {
 				_ = f.Close()
 				f = nil
 				if written != size {
+					_ = os.Remove(partPath)
 					transfers.finish(taskID, "error", "received size mismatch")
 					_ = writeFrame(conn, Header{Type: "error", Message: "received size mismatch"}, nil)
+					return
+				}
+				// MD5 校验（发送端未携带则跳过，向后兼容）
+				if h.MD5 != "" && hash != nil {
+					if got := hex.EncodeToString(hash.Sum(nil)); got != h.MD5 {
+						_ = os.Remove(partPath)
+						transfers.finish(taskID, "error", "md5 mismatch")
+						_ = writeFrame(conn, Header{Type: "error", Message: "md5 mismatch"}, nil)
+						return
+					}
+				}
+				if err := os.Rename(partPath, finalPath); err != nil {
+					_ = os.Remove(partPath)
+					transfers.finish(taskID, "error", err.Error())
+					_ = writeFrame(conn, Header{Type: "error", Message: err.Error()}, nil)
 					return
 				}
 			}
@@ -282,10 +323,28 @@ func sendOne(conn net.Conn, it sendItem, fi, total int, onProgress func(int64)) 
 	if err := writeFrame(conn, meta, nil); err != nil {
 		return err
 	}
-	if h, _, err := readFrame(conn); err != nil {
+	ackH, _, err := readFrame(conn)
+	if err != nil {
 		return err
-	} else if h.Type == "error" {
-		return errors.New(h.Message)
+	}
+	if ackH.Type == "error" {
+		return errors.New(ackH.Message)
+	}
+
+	hash := md5.New()
+	var offset int64
+	if ackH.Offset > 0 && ackH.Offset < st.Size() {
+		offset = ackH.Offset
+		// 补算 [0, offset) 的 MD5 前缀，再从断点续发
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			return err
+		}
+		if _, err := io.CopyN(hash, f, offset); err != nil {
+			return err
+		}
+		if _, err := f.Seek(offset, io.SeekStart); err != nil {
+			return err
+		}
 	}
 
 	buf := make([]byte, chunkSize)
@@ -297,6 +356,7 @@ func sendOne(conn net.Conn, it sendItem, fi, total int, onProgress func(int64)) 
 			if err := writeFrame(conn, Header{Type: "file_data", FileID: fileID, ChunkIndex: idx}, buf[:n]); err != nil {
 				return err
 			}
+			_, _ = hash.Write(buf[:n])
 			idx++
 			sent += int64(n)
 			if onProgress != nil {
@@ -311,7 +371,7 @@ func sendOne(conn net.Conn, it sendItem, fi, total int, onProgress func(int64)) 
 		}
 	}
 
-	if err := writeFrame(conn, Header{Type: "file_end", FileID: fileID, TotalBytes: st.Size()}, nil); err != nil {
+	if err := writeFrame(conn, Header{Type: "file_end", FileID: fileID, TotalBytes: st.Size(), MD5: hex.EncodeToString(hash.Sum(nil))}, nil); err != nil {
 		return err
 	}
 	if h, _, err := readFrame(conn); err != nil {

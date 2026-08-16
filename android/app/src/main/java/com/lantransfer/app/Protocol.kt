@@ -28,6 +28,8 @@ object Protocol {
         var ip: String? = null
         var text: String? = null
         var relPath: String? = null
+        var md5: String? = null      // file_end 时整文件 MD5（32 位小写 hex）
+        var offset: Long = 0         // ack 时告知已收字节数（断点续传）
 
         fun toJson(): JSONObject {
             val o = JSONObject()
@@ -49,6 +51,8 @@ object Protocol {
             ip?.let { o.put("ip", it) }
             text?.let { o.put("text", it) }
             relPath?.let { o.put("relPath", it) }
+            md5?.let { o.put("md5", it) }
+            if (offset != 0L) o.put("offset", offset)
             return o
         }
 
@@ -73,6 +77,8 @@ object Protocol {
                 h.ip = o.optString("ip").takeIf { it.isNotEmpty() }
                 h.text = o.optString("text").takeIf { it.isNotEmpty() }
                 h.relPath = o.optString("relPath").takeIf { it.isNotEmpty() }
+                h.md5 = o.optString("md5").takeIf { it.isNotEmpty() }
+                h.offset = o.optLong("offset", 0)
                 return h
             }
         }
