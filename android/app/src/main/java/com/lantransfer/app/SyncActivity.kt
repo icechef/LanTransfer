@@ -27,6 +27,7 @@ class SyncActivity : AppCompatActivity() {
     private lateinit var folderContainer: LinearLayout
     private lateinit var progressBar: ProgressBar
     private lateinit var progressText: TextView
+    private lateinit var pauseBtn: Button
 
     private val pool = Executors.newSingleThreadExecutor()
     private val targetCandidates = mutableListOf<Device>()
@@ -41,10 +42,12 @@ class SyncActivity : AppCompatActivity() {
         folderContainer = findViewById(R.id.syncFolderContainer)
         progressBar = findViewById(R.id.syncProgressBar)
         progressText = findViewById(R.id.syncProgressText)
+        pauseBtn = findViewById(R.id.syncPauseBtn)
 
         findViewById<Button>(R.id.syncPickTargetBtn).setOnClickListener { pickTarget() }
         findViewById<Button>(R.id.syncAddBtn).setOnClickListener { addFolder() }
         findViewById<Button>(R.id.syncAllBtn).setOnClickListener { syncAll() }
+        pauseBtn.setOnClickListener { togglePause() }
 
         refreshTarget()
         refreshFolders()
@@ -243,11 +246,13 @@ class SyncActivity : AppCompatActivity() {
         if (syncing) { Toast.makeText(this, "正在同步中…", Toast.LENGTH_SHORT).show(); return }
         if (SettingsStore.syncTarget(this).isBlank()) { Toast.makeText(this, "请先选择目标电脑", Toast.LENGTH_SHORT).show(); return }
 
-        beginSync()
+        beginSync(showPause = true)
         pool.execute {
             SyncManager.syncFolder(this, f, progressCallback()) { sent, failed ->
-                endSync(syncResultMsg(sent, failed))
-                refreshAllStatus()
+                runOnUiThread {
+                    endSync(syncResultMsg(sent, failed))
+                    refreshAllStatus()
+                }
             }
         }
     }
@@ -258,11 +263,13 @@ class SyncActivity : AppCompatActivity() {
         val enabled = SettingsStore.syncFolders(this).filter { it.enabled }
         if (enabled.isEmpty()) { Toast.makeText(this, "没有开启自动同步的文件夹", Toast.LENGTH_SHORT).show(); return }
 
-        beginSync()
+        beginSync(showPause = true)
         pool.execute {
             SyncManager.syncAllEnabled(this, progressCallback()) { sent, failed ->
-                endSync(syncResultMsg(sent, failed))
-                refreshAllStatus()
+                runOnUiThread {
+                    endSync(syncResultMsg(sent, failed))
+                    refreshAllStatus()
+                }
             }
         }
     }
@@ -272,19 +279,14 @@ class SyncActivity : AppCompatActivity() {
         if (SettingsStore.syncTarget(this).isBlank()) { Toast.makeText(this, "请先选择目标电脑", Toast.LENGTH_SHORT).show(); return }
 
         AlertDialog.Builder(this)
-            .setTitle("扫描重置")
-            .setMessage("将重新校验「${f.name}」与电脑同步目录的文件，并检测电脑端是否存在多余文件。确定继续？")
+            .setTitle("扫描校验")
+            .setMessage("将重新校验「${f.name}」与电脑同步目录的文件，检测多余文件与待同步数量，不进行传输。")
             .setPositiveButton("开始") { _, _ ->
-                beginSync()
+                beginSync(showPause = false)
                 pool.execute {
-                    SyncManager.scanReset(this, f, progressCallback()) { sent, failed, extra ->
-                        val base = syncResultMsg(sent, failed)
-                        val msg = if (extra.isNotEmpty()) {
-                            "$base\n电脑端存在 ${extra.size} 个多余文件（手机已删除）：\n" + extra.take(10).joinToString("\n") +
-                                (if (extra.size > 10) "\n…等" else "")
-                        } else "$base（无多余文件）"
+                    SyncManager.scanReset(this, f) { extra, pendingCount ->
                         runOnUiThread {
-                            endSync(msg)
+                            endSync(scanResultMsg(extra, pendingCount))
                             refreshAllStatus()
                         }
                     }
@@ -292,6 +294,21 @@ class SyncActivity : AppCompatActivity() {
             }
             .setNegativeButton("取消", null)
             .show()
+    }
+
+    private fun togglePause() {
+        if (!syncing) return
+        if (SyncManager.isPaused()) {
+            SyncManager.resume()
+            pauseBtn.text = "暂停"
+            progressText.text = "继续同步…"
+            Toast.makeText(this, "已继续同步", Toast.LENGTH_SHORT).show()
+        } else {
+            SyncManager.pause()
+            pauseBtn.text = "继续"
+            progressText.text = "已暂停"
+            Toast.makeText(this, "已暂停同步", Toast.LENGTH_SHORT).show()
+        }
     }
 
     private fun progressCallback(): (Long, Long, String) -> Unit = { done, total, name ->
@@ -302,18 +319,23 @@ class SyncActivity : AppCompatActivity() {
         }
     }
 
-    private fun beginSync() {
+    private fun beginSync(showPause: Boolean) {
         syncing = true
+        SyncManager.resume()
         progressBar.visibility = View.VISIBLE
         progressText.visibility = View.VISIBLE
         progressBar.progress = 0
         progressText.text = "准备同步…"
+        pauseBtn.text = "暂停"
+        pauseBtn.visibility = if (showPause) View.VISIBLE else View.GONE
     }
 
     private fun endSync(msg: String) {
         syncing = false
+        SyncManager.resume()
         progressBar.visibility = View.GONE
         progressText.visibility = View.GONE
+        pauseBtn.visibility = View.GONE
         Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
     }
 
@@ -321,6 +343,14 @@ class SyncActivity : AppCompatActivity() {
         sent == 0 && failed == 0 -> "没有需要同步的新文件"
         failed == 0 -> "同步完成：上传 $sent 个文件"
         else -> "同步结束：成功 $sent 个，失败 $failed 个"
+    }
+
+    private fun scanResultMsg(extra: List<String>, pendingCount: Int): String {
+        val base = "扫描完成：待同步 $pendingCount 个文件"
+        return if (extra.isNotEmpty()) {
+            "$base\n电脑端存在 ${extra.size} 个多余文件（手机已删除）：\n" +
+                extra.take(10).joinToString("\n") + (if (extra.size > 10) "\n…等" else "")
+        } else "$base（无多余文件）"
     }
 
     // ---- 工具 ----

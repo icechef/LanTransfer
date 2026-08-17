@@ -338,6 +338,9 @@ async function loadDevices() {
 }
 
 async function loadFiles() {
+  // 只有主机网页端才通过接收目录检测「收到文件」；远程网页端的接收走 inbox 中转，
+  // 否则会把发到主机的文件误报给所有网页端。
+  if (!isLocal) return;
   try {
     const r = await fetch('/api/files'); const list = await r.json();
     if (!seenFilesInit) {
@@ -849,6 +852,8 @@ function showPendingDialog(name, size) {
   };
 }
 async function loadPending() {
+  // 待确认接收区是主机的功能（autoSave 关闭时），仅主机网页端处理
+  if (!isLocal) return;
   try {
     const r = await fetch('/api/pending'); const list = await r.json();
     list.forEach(f => {

@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.Uri
 import android.provider.DocumentsContract
 import org.json.JSONObject
+import java.io.OutputStream
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.security.MessageDigest
@@ -19,6 +20,12 @@ object SyncManager {
     private data class Synced(val mtime: Long, val size: Long)
 
     private val executor = Executors.newSingleThreadExecutor()
+
+    // 暂停/恢复：手动同步与后台同步共用
+    @Volatile private var paused = false
+    fun pause() { paused = true }
+    fun resume() { paused = false }
+    fun isPaused(): Boolean = paused
 
     // 文件夹名去非法字符（Windows 文件名不允许 \ / : * ? " < > |）
     fun safeFolder(name: String): String =
@@ -99,6 +106,7 @@ object SyncManager {
     fun startBackgroundSync(ctx: Context) {
         val app = ctx.applicationContext
         executor.execute {
+            resume() // 后台同步开始时重置暂停状态
             val folders = SettingsStore.syncFolders(app).filter { it.enabled }
             var sent = 0
             var failed = 0
@@ -162,23 +170,18 @@ object SyncManager {
         onDone?.invoke(sentCount, pending.size - sentCount)
     }
 
-    // 扫描重置：清空同步进度，重新做目录校验；若电脑端同步目录存在「多余文件」（源里已删），
-    // 通过 onDone 的第三个参数返回相对路径列表，供界面提示。
-    // onProgress(done, total, 当前文件名)；onDone(成功数, 失败数, 多余文件列表)。
+    // 扫描重置：只做目录校验（不传输、不改同步进度）。
+    // 对比手机源目录与电脑端同步目录，通过 onDone 返回：多余文件列表（电脑有手机无）+ 待同步文件数。
     fun scanReset(
         ctx: Context,
         folder: SettingsStore.SyncFolder,
-        onProgress: ((Long, Long, String) -> Unit)? = null,
-        onDone: ((Int, Int, List<String>) -> Unit)? = null
+        onDone: ((List<String>, Int) -> Unit)? = null
     ) {
         val target = SettingsStore.syncTarget(ctx)
-        if (target.isBlank()) { onDone?.invoke(0, 0, emptyList()); return }
+        if (target.isBlank()) { onDone?.invoke(emptyList(), 0); return }
         val source = listSource(ctx, Uri.parse(folder.uri))
         val dev = safeFolder(SettingsStore.deviceName(ctx))
         val fol = safeFolder(folder.name)
-
-        // 重置进度
-        saveSynced(ctx, folder.id, emptyMap())
 
         // 电脑端同步目录已有文件
         val ip = target.substringBefore(':')
@@ -189,36 +192,12 @@ object SyncManager {
         val sourceRels = source.map { it.relPath }.toSet()
         val extraFiles = remote.filter { it.relPath !in sourceRels }.map { it.relPath }
 
-        // 待上传：手机有、电脑无，或 mtime/size 不同
-        val toUpload = source.filter { f ->
+        // 待同步：手机有、电脑无，或 mtime/size 不同
+        val pendingCount = source.count { f ->
             val r = remoteByRel[f.relPath]
             r == null || r.mtime != f.mtime || r.size != f.size
         }
-
-        // 记录本次成功上传的文件，最终同步清单 = 电脑端已一致的文件 + 刚上传成功的文件
-        val uploaded = mutableSetOf<String>()
-        if (toUpload.isNotEmpty()) {
-            val total = toUpload.sumOf { it.size }
-            val sentCount = sendSync(ctx, target, dev, fol, toUpload, { done, name ->
-                onProgress?.invoke(done, total, name)
-            }) { f -> uploaded.add(f.relPath) }
-            onProgress?.invoke(total, total, "")
-            val newMap = mutableMapOf<String, Synced>()
-            for (f in source) {
-                val r = remoteByRel[f.relPath]
-                if ((r != null && r.mtime == f.mtime && r.size == f.size) || f.relPath in uploaded) {
-                    newMap[f.relPath] = Synced(f.mtime, f.size)
-                }
-            }
-            saveSynced(ctx, folder.id, newMap)
-            SettingsStore.setSyncLast(ctx, System.currentTimeMillis())
-            onDone?.invoke(sentCount, toUpload.size - sentCount, extraFiles)
-        } else {
-            val newMap = source.associate { it.relPath to Synced(it.mtime, it.size) }
-            saveSynced(ctx, folder.id, newMap)
-            SettingsStore.setSyncLast(ctx, System.currentTimeMillis())
-            onDone?.invoke(0, 0, extraFiles)
-        }
+        onDone?.invoke(extraFiles, pendingCount)
     }
 
     // 连接电脑 TCP 端口发送一批文件（带 sync 标志 + <设备名>/<源目录名>/<相对路径> 结构 + mtime），
@@ -270,6 +249,8 @@ object SyncManager {
                         val buf = ByteArray(1 shl 20)
                         var idx = 0L
                         while (true) {
+                            // 暂停：等待恢复，期间每 20s 发空块心跳防止电脑端读超时断连
+                            waitWhilePaused(out, index.toString(), idx)
                             val n = fin.read(buf)
                             if (n <= 0) break
                             val chunk = if (n == buf.size) buf else buf.copyOf(n)
@@ -296,5 +277,24 @@ object SyncManager {
                 try { s.close() } catch (_: Exception) {}
             }
         } catch (_: Exception) { sentCount }
+    }
+
+    // 暂停时阻塞等待恢复，同时每 20s 发一个空 file_data 心跳，避免电脑端 60s 读超时断连
+    private fun waitWhilePaused(out: OutputStream, fileId: String, chunkIndex: Long) {
+        var lastBeat = System.currentTimeMillis()
+        while (paused) {
+            try { Thread.sleep(200) } catch (_: InterruptedException) { return }
+            val now = System.currentTimeMillis()
+            if (now - lastBeat >= 20000) {
+                try {
+                    Protocol.write(out, Protocol.Header().apply {
+                        type = "file_data"
+                        this.fileId = fileId
+                        this.chunkIndex = chunkIndex
+                    }, ByteArray(0))
+                } catch (_: Exception) { return }
+                lastBeat = now
+            }
+        }
     }
 }

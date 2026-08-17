@@ -464,8 +464,14 @@ class MainActivity : AppCompatActivity() {
                 if (ni >= 0) name = c.getString(ni) ?: name
                 val si = c.getColumnIndex(OpenableColumns.SIZE)
                 if (si >= 0 && !c.isNull(si)) size = c.getLong(si)
+                // MediaStore 来源：DATE_MODIFIED（秒）
                 val mi = c.getColumnIndex(MediaStore.MediaColumns.DATE_MODIFIED)
                 if (mi >= 0 && !c.isNull(mi)) mtime = c.getLong(mi)
+                // SAF document 来源（ACTION_OPEN_DOCUMENT 等）：COLUMN_LAST_MODIFIED（毫秒）
+                if (mtime == 0L) {
+                    val li = c.getColumnIndex(DocumentsContract.Document.COLUMN_LAST_MODIFIED)
+                    if (li >= 0 && !c.isNull(li)) mtime = c.getLong(li) / 1000
+                }
             }
         }
         return PendingFile(uri, name, size, "", mtime)

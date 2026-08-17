@@ -72,6 +72,14 @@
                 android:layout_height="wrap_content"
                 android:layout_marginStart="8dp"
                 android:text="全部同步" />
+
+            <Button
+                android:id="@+id/syncPauseBtn"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:text="暂停"
+                android:visibility="gone" />
         </LinearLayout>
 
         <LinearLayout

@@ -45,12 +45,19 @@ object ReceiveStorage {
                 return
             }
             try {
-                val v = ContentValues().apply {
+                // 第一步：清 IS_PENDING + 改最终名，触发 MediaStore 扫描
+                val v1 = ContentValues().apply {
                     put(MediaStore.MediaColumns.DISPLAY_NAME, name)
                     put(MediaStore.MediaColumns.IS_PENDING, 0)
-                    if (mtime > 0) put(MediaStore.MediaColumns.DATE_MODIFIED, mtime)
                 }
-                ctx.contentResolver.update(uri!!, v, null, null)
+                ctx.contentResolver.update(uri!!, v1, null, null)
+                // 第二步：单独设置 DATE_MODIFIED——放在扫描之后，避免被扫描读出的「接收时间」覆盖
+                if (mtime > 0) {
+                    val v2 = ContentValues().apply {
+                        put(MediaStore.MediaColumns.DATE_MODIFIED, mtime)
+                    }
+                    ctx.contentResolver.update(uri!!, v2, null, null)
+                }
             } catch (_: Exception) {}
         }
 
