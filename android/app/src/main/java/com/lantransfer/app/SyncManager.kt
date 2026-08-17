@@ -27,6 +27,12 @@ object SyncManager {
     fun resume() { paused = false }
     fun isPaused(): Boolean = paused
 
+    // 停止同步：点击「停止同步」后置位，发送循环每块前检查，中断后续传输
+    @Volatile private var stopRequested = false
+    fun requestStop() { stopRequested = true }
+    fun resetStop() { stopRequested = false }
+    fun isStopRequested(): Boolean = stopRequested
+
     // 文件夹名去非法字符（Windows 文件名不允许 \ / : * ? " < > |）
     fun safeFolder(name: String): String =
         name.replace(Regex("[\\\\/:*?\"<>|]"), "_").trim().ifEmpty { "设备" }
@@ -135,12 +141,14 @@ object SyncManager {
     }
 
     // 增量同步单个文件夹（需在后台线程调用）。
-    // onProgress(done, total, 当前文件名)；onDone(成功数, 失败数)。
+    // onProgress(done, total, 当前文件名)；onDone(成功数, 失败数)；
+    // onFileSynced(当前文件夹已同步数, 总数) 每成功一个文件回调一次，供界面实时刷新「已同步x/共y」。
     fun syncFolder(
         ctx: Context,
         folder: SettingsStore.SyncFolder,
         onProgress: ((Long, Long, String) -> Unit)? = null,
-        onDone: ((Int, Int) -> Unit)? = null
+        onDone: ((Int, Int) -> Unit)? = null,
+        onFileSynced: ((Int, Int) -> Unit)? = null
     ) {
         val target = SettingsStore.syncTarget(ctx)
         if (target.isBlank()) { onDone?.invoke(0, 0); return }
@@ -154,16 +162,23 @@ object SyncManager {
             SettingsStore.setSyncLast(ctx, System.currentTimeMillis())
             onProgress?.invoke(0L, 0L, "")
             onDone?.invoke(0, 0)
+            onFileSynced?.invoke(source.size, source.size)
             return
         }
         val dev = safeFolder(SettingsStore.deviceName(ctx))
         val fol = safeFolder(folder.name)
         val total = pending.sumOf { it.size }
+        // 此前已同步（不在本次待传列表里）的文件数
+        val alreadySynced = source.size - pending.size
+        var syncedSoFar = 0 // 本次已成功上传的计数
         val sentCount = sendSync(ctx, target, dev, fol, pending, { done, name ->
             onProgress?.invoke(done, total, name)
-        }) { f ->
+        }, { f ->
             synced[f.relPath] = Synced(f.mtime, f.size)
-        }
+            syncedSoFar++
+            // 每成功一个文件就回调已同步计数（此前已同步 + 本次已传），供界面实时刷新「已同步x/共y」
+            onFileSynced?.invoke(alreadySynced + syncedSoFar, source.size)
+        })
         saveSynced(ctx, folder.id, synced)
         SettingsStore.setSyncLast(ctx, System.currentTimeMillis())
         onProgress?.invoke(total, total, "")
@@ -227,6 +242,8 @@ object SyncManager {
                 Protocol.write(out, Protocol.hello(SettingsStore.deviceName(ctx), "Android"))
                 if (Protocol.read(input) == null) return sentCount
                 for ((index, f) in files.withIndex()) {
+                    // 停止同步：不继续发送后续文件
+                    if (stopRequested) break
                     val meta = Protocol.Header().apply {
                         type = "file_meta"
                         fileId = index.toString()
@@ -251,6 +268,8 @@ object SyncManager {
                         while (true) {
                             // 暂停：等待恢复，期间每 20s 发空块心跳防止电脑端读超时断连
                             waitWhilePaused(out, index.toString(), idx)
+                            // 停止同步：中断当前文件传输
+                            if (stopRequested) return sentCount
                             val n = fin.read(buf)
                             if (n <= 0) break
                             val chunk = if (n == buf.size) buf else buf.copyOf(n)

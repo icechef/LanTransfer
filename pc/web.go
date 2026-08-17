@@ -524,10 +524,31 @@ type fileEntry struct {
 	Mtime  int64  `json:"mtime"`
 	Source string `json:"source"`         // "receive"（他人发来）/"upload"（本机上传暂存）/"share"（路径共享）
 	Path   string `json:"path,omitempty"` // share 来源的真实路径
+	From   string `json:"from,omitempty"` // receive 来源设备名（用于网页端「已收到来自xx」提示）
+}
+
+// receivedFrom 记录最近 TCP 接收到的文件与来源设备名，供主机网页端显示「已收到来自xx」。
+var (
+	receivedFromMu sync.Mutex
+	receivedFrom   = map[string]string{}
+)
+
+func recordReceivedFrom(name, from string) {
+	receivedFromMu.Lock()
+	receivedFrom[name] = from
+	receivedFromMu.Unlock()
 }
 
 func (s *webServer) handleFiles(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, listDirFiles(s.receiveDir, "receive"))
+	files := listDirFiles(s.receiveDir, "receive")
+	receivedFromMu.Lock()
+	for i := range files {
+		if f, ok := receivedFrom[files[i].Name]; ok {
+			files[i].From = f
+		}
+	}
+	receivedFromMu.Unlock()
+	writeJSON(w, files)
 }
 
 // handleStaged 返回缓存目录（上传暂存 + 网页中转）与路径共享的文件。

@@ -242,6 +242,8 @@ func receiveLoop(conn net.Conn, peerName string) {
 				if mtime > 0 {
 					_ = os.Chtimes(finalPath, time.Unix(mtime, 0), time.Unix(mtime, 0))
 				}
+				// 记录接收来源（供主机网页端「已收到来自xx」提示）
+				recordReceivedFrom(filepath.Base(finalPath), peerName)
 			}
 			active = false
 			transfers.finish(taskID, "done", "")

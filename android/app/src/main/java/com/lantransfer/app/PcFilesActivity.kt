@@ -11,6 +11,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.provider.DocumentsContract
 import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.view.View
@@ -29,7 +30,7 @@ import java.util.concurrent.atomic.AtomicInteger
 // 浏览/下载/上传电脑的缓存目录与共享文件夹（含子目录）
 class PcFilesActivity : AppCompatActivity() {
 
-    private data class Row(val name: String, val isDir: Boolean, val size: Long, val path: String)
+    private data class Row(val name: String, val isDir: Boolean, val size: Long, val path: String, val mtime: Long)
 
     private lateinit var ip: String
     private val rows = mutableListOf<Row>()
@@ -82,7 +83,7 @@ class PcFilesActivity : AppCompatActivity() {
                 val folders = PcApi.listFolders(ip)
                 runOnUiThread {
                     rows.clear()
-                    for (f in folders) rows.add(Row(if (f.kind == "cache") f.name else "${f.name}${if (f.readonly) "（只读）" else ""}", true, 0, f.path))
+                    for (f in folders) rows.add(Row(if (f.kind == "cache") f.name else "${f.name}${if (f.readonly) "（只读）" else ""}", true, 0, f.path, 0))
                     adapter.notifyDataSetChanged()
                     emptyView.visibility = if (rows.isEmpty()) View.VISIBLE else View.GONE
                     backBtn.isEnabled = false
@@ -99,7 +100,7 @@ class PcFilesActivity : AppCompatActivity() {
                         writable = r.writable
                         for (e in r.entries) {
                             val p = if (current.endsWith("/")) current + e.name else "$current/${e.name}"
-                            rows.add(Row(e.name, e.isDir, e.size, p))
+                            rows.add(Row(e.name, e.isDir, e.size, p, e.mtime))
                         }
                     }
                     adapter.notifyDataSetChanged()
@@ -163,15 +164,24 @@ class PcFilesActivity : AppCompatActivity() {
     private fun resolveFile(uri: Uri): PendingFile {
         var name = "file"
         var size = 0L
+        var mtime = 0L
         contentResolver.query(uri, null, null, null, null)?.use { c ->
             if (c.moveToFirst()) {
                 val ni = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
                 if (ni >= 0) name = c.getString(ni) ?: name
                 val si = c.getColumnIndex(OpenableColumns.SIZE)
                 if (si >= 0 && !c.isNull(si)) size = c.getLong(si)
+                // MediaStore 来源：DATE_MODIFIED（秒）
+                val mi = c.getColumnIndex(MediaStore.MediaColumns.DATE_MODIFIED)
+                if (mi >= 0 && !c.isNull(mi)) mtime = c.getLong(mi)
+                // SAF document 来源：COLUMN_LAST_MODIFIED（毫秒）
+                if (mtime == 0L) {
+                    val li = c.getColumnIndex(DocumentsContract.Document.COLUMN_LAST_MODIFIED)
+                    if (li >= 0 && !c.isNull(li)) mtime = c.getLong(li) / 1000
+                }
             }
         }
-        return PendingFile(uri, name, size, "")
+        return PendingFile(uri, name, size, "", mtime)
     }
 
     private fun download(row: Row) {
@@ -195,7 +205,11 @@ class PcFilesActivity : AppCompatActivity() {
                 }
             } ?: false
             if (ok) {
+                // 先清 IS_PENDING（触发扫描），再单独设 DATE_MODIFIED——放在扫描之后，避免被「接收时间」覆盖
                 contentResolver.update(uri, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null)
+                if (row.mtime > 0) {
+                    contentResolver.update(uri, ContentValues().apply { put(MediaStore.MediaColumns.DATE_MODIFIED, row.mtime) }, null, null)
+                }
                 runOnUiThread { Toast.makeText(this, "接收完成 ${row.name}", Toast.LENGTH_SHORT).show() }
                 postDownloadDone(notifId, row.name, uri)
             } else {

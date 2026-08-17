@@ -352,7 +352,10 @@ async function loadFiles() {
       for (const name in now) {
         if (seenFiles[name] === undefined) {
           const it = list.find(x => x.name === name);
-          showReceiveDialog('收到文件', '<b>'+escapeHtml(name)+'</b>（'+fmtSize(it ? it.size : 0)+'）', '/api/download/'+encodeURIComponent(name));
+          // 自动接收：显示「已收到来自xx的xx文件」自动关闭提示，不需要用户点击
+          const from = (it && it.from) ? it.from : '';
+          const sizeTxt = it ? fmtSize(it.size) : '';
+          toast((from ? '已收到来自 ' + from + ' 的 ' : '已收到文件 ') + name + (sizeTxt ? '（' + sizeTxt + '）' : ''));
         }
       }
       seenFiles = now;
@@ -439,8 +442,11 @@ $('renameBtn').onclick = () => {
       const r = await fetch('/api/webname', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ sid: mySid, name }) });
       const d = await r.json();
       if (d.ok) { myName = d.name; localStorage.setItem('myname', myName); renderSelf(); }
-      // 同时改电脑（TCP）设备名：手机扫描 PC 时显示这个名字，而不是主机名
-      try { await fetch('/api/name', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ name }) }); } catch(e) {}
+      // 同时改电脑（TCP）设备名：仅主机自己的网页端才能改主机名，
+      // 远程网页端只改自己的会话名，否则主机名会被最后一个改名的网页覆盖。
+      if (isLocal) {
+        try { await fetch('/api/name', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ name }) }); } catch(e) {}
+      }
       toast('已改名为 ' + name);
     } catch(e) { toast('改名失败'); }
   });

@@ -28,12 +28,12 @@ class SyncActivity : AppCompatActivity() {
     private lateinit var progressBar: ProgressBar
     private lateinit var progressText: TextView
     private lateinit var pauseBtn: Button
+    private lateinit var syncAllBtn: Button
 
     private val pool = Executors.newSingleThreadExecutor()
     private val targetCandidates = mutableListOf<Device>()
     private val statusViews = HashMap<String, TextView>() // folderId -> 状态 TextView
     @Volatile private var syncing = false
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_sync)
@@ -43,10 +43,11 @@ class SyncActivity : AppCompatActivity() {
         progressBar = findViewById(R.id.syncProgressBar)
         progressText = findViewById(R.id.syncProgressText)
         pauseBtn = findViewById(R.id.syncPauseBtn)
+        syncAllBtn = findViewById(R.id.syncAllBtn)
 
         findViewById<Button>(R.id.syncPickTargetBtn).setOnClickListener { pickTarget() }
         findViewById<Button>(R.id.syncAddBtn).setOnClickListener { addFolder() }
-        findViewById<Button>(R.id.syncAllBtn).setOnClickListener { syncAll() }
+        syncAllBtn.setOnClickListener { onSyncAllClick() }
         pauseBtn.setOnClickListener { togglePause() }
 
         refreshTarget()
@@ -248,16 +249,36 @@ class SyncActivity : AppCompatActivity() {
 
         beginSync(showPause = true)
         pool.execute {
-            SyncManager.syncFolder(this, f, progressCallback()) { sent, failed ->
-                runOnUiThread {
-                    endSync(syncResultMsg(sent, failed))
-                    refreshAllStatus()
+            SyncManager.syncFolder(
+                this, f, progressCallback(),
+                onDone = { sent, failed ->
+                    runOnUiThread {
+                        endSync(syncResultMsg(sent, failed))
+                        refreshAllStatus()
+                    }
+                },
+                onFileSynced = { syncedCount, total ->
+                    runOnUiThread { statusViews[f.id]?.text = "已同步 $syncedCount / 共 $total 个文件" }
                 }
-            }
+            )
         }
     }
 
-    private fun syncAll() {
+    private fun onSyncAllClick() {
+        if (syncing) {
+            // 正在同步：点击「停止同步」→ 请求停止
+            SyncManager.requestStop()
+            pauseBtn.isEnabled = false
+            syncAllBtn.text = "正在停止…"
+            syncAllBtn.isEnabled = false
+            progressText.text = "正在停止…"
+            Toast.makeText(this, "正在停止同步…", Toast.LENGTH_SHORT).show()
+        } else {
+            startSyncAll()
+        }
+    }
+
+    private fun startSyncAll() {
         if (syncing) { Toast.makeText(this, "正在同步中…", Toast.LENGTH_SHORT).show(); return }
         if (SettingsStore.syncTarget(this).isBlank()) { Toast.makeText(this, "请先选择目标电脑", Toast.LENGTH_SHORT).show(); return }
         val enabled = SettingsStore.syncFolders(this).filter { it.enabled }
@@ -265,11 +286,23 @@ class SyncActivity : AppCompatActivity() {
 
         beginSync(showPause = true)
         pool.execute {
-            SyncManager.syncAllEnabled(this, progressCallback()) { sent, failed ->
-                runOnUiThread {
-                    endSync(syncResultMsg(sent, failed))
-                    refreshAllStatus()
-                }
+            var sent = 0
+            var failed = 0
+            for (f in enabled) {
+                if (SyncManager.isStopRequested()) break
+                SyncManager.syncFolder(
+                    this, f, progressCallback(),
+                    onDone = { s, fl -> sent += s; failed += fl },
+                    onFileSynced = { syncedCount, total ->
+                        runOnUiThread { statusViews[f.id]?.text = "已同步 $syncedCount / 共 $total 个文件" }
+                    }
+                )
+            }
+            val finalSent = sent
+            val finalFailed = failed
+            runOnUiThread {
+                endSync(syncResultMsg(finalSent, finalFailed))
+                refreshAllStatus()
             }
         }
     }
@@ -282,7 +315,7 @@ class SyncActivity : AppCompatActivity() {
             .setTitle("扫描校验")
             .setMessage("将重新校验「${f.name}」与电脑同步目录的文件，检测多余文件与待同步数量，不进行传输。")
             .setPositiveButton("开始") { _, _ ->
-                beginSync(showPause = false)
+                beginSync(showPause = false, transfer = false)
                 pool.execute {
                     SyncManager.scanReset(this, f) { extra, pendingCount ->
                         runOnUiThread {
@@ -319,15 +352,25 @@ class SyncActivity : AppCompatActivity() {
         }
     }
 
-    private fun beginSync(showPause: Boolean) {
+    private fun beginSync(showPause: Boolean, transfer: Boolean = true) {
         syncing = true
         SyncManager.resume()
+        SyncManager.resetStop()
         progressBar.visibility = View.VISIBLE
         progressText.visibility = View.VISIBLE
         progressBar.progress = 0
-        progressText.text = "准备同步…"
+        progressText.text = if (transfer) "准备同步…" else "正在扫描…"
         pauseBtn.text = "暂停"
         pauseBtn.visibility = if (showPause) View.VISIBLE else View.GONE
+        pauseBtn.isEnabled = true
+        // 只有真正的传输同步才把「全部同步」切换成「停止同步」；扫描校验期间禁用该按钮
+        if (transfer) {
+            syncAllBtn.text = "停止同步"
+            syncAllBtn.isEnabled = true
+        } else {
+            syncAllBtn.text = "全部同步"
+            syncAllBtn.isEnabled = false
+        }
     }
 
     private fun endSync(msg: String) {
@@ -336,13 +379,22 @@ class SyncActivity : AppCompatActivity() {
         progressBar.visibility = View.GONE
         progressText.visibility = View.GONE
         pauseBtn.visibility = View.GONE
-        Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+        syncAllBtn.text = "全部同步"
+        syncAllBtn.isEnabled = true
+        Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
     }
 
-    private fun syncResultMsg(sent: Int, failed: Int): String = when {
-        sent == 0 && failed == 0 -> "没有需要同步的新文件"
-        failed == 0 -> "同步完成：上传 $sent 个文件"
-        else -> "同步结束：成功 $sent 个，失败 $failed 个"
+    private fun syncResultMsg(sent: Int, failed: Int): String {
+        // 用户主动点了「停止同步」
+        if (SyncManager.isStopRequested()) {
+            return if (sent > 0) "已停止，本次同步已上传 $sent 个文件"
+            else "已停止，本次未上传文件"
+        }
+        return when {
+            sent == 0 && failed == 0 -> "没有需要同步的新文件"
+            failed == 0 -> "同步完成：上传 $sent 个文件"
+            else -> "同步结束：成功 $sent 个，失败 $failed 个"
+        }
     }
 
     private fun scanResultMsg(extra: List<String>, pendingCount: Int): String {

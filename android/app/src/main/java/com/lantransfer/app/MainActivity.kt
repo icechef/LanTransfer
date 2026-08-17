@@ -389,7 +389,10 @@ class MainActivity : AppCompatActivity() {
                     1 -> "video/*"
                     else -> "audio/*"
                 }
-                val i = Intent(Intent.ACTION_GET_CONTENT).apply {
+                // 用 ACTION_OPEN_DOCUMENT 而非 ACTION_GET_CONTENT：
+                // GET_CONTENT 返回的 uri 其 _display_name 可能是内部数字 ID（如 100000151724.jpg），
+                // 导致选中的图片/视频被重命名；OPEN_DOCUMENT 走 DocumentsUI，能拿到真实文件名。
+                val i = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
                     addCategory(Intent.CATEGORY_OPENABLE)
                     putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
                     type = mime
