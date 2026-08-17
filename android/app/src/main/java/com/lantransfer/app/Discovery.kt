@@ -6,7 +6,10 @@ import java.net.InetSocketAddress
 import java.net.NetworkInterface
 import java.net.DatagramSocket
 import java.net.Socket
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 object Discovery {
     private val pool = Executors.newFixedThreadPool(64)
@@ -132,5 +135,25 @@ object Discovery {
         } catch (_: Exception) {
             null
         }
+    }
+
+    // 按计算机名解析当前在线设备（IP 变了也能认出同一台电脑）。
+    // 阻塞扫描子网，命中 type==PC 且 name 匹配即返回；超时（8s）未命中返回 null。
+    fun resolveTarget(name: String, port: Int, selfName: String, selfType: String): Device? {
+        if (name.isBlank()) return null
+        var result: Device? = null
+        val found = AtomicBoolean(false)
+        val latch = CountDownLatch(1)
+        scan(port, selfName, selfType,
+            onFound = { d ->
+                if (d.type == "PC" && d.name == name && found.compareAndSet(false, true)) {
+                    result = d
+                    latch.countDown()
+                }
+            },
+            onDone = { latch.countDown() }
+        )
+        try { latch.await(8, TimeUnit.SECONDS) } catch (_: Exception) {}
+        return result
     }
 }

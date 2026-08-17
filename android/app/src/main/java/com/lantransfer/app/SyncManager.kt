@@ -108,6 +108,17 @@ object SyncManager {
         return SyncStatus(source.size, syncedCount, source.size - syncedCount)
     }
 
+    // 把存储的同步目标解析为当前 ip:port 地址。存储值可能是：
+    //  - 计算机名（新）：扫描子网按 type==PC 且 name 匹配解析，IP 变了也能认出同一台电脑
+    //  - ip:port（旧版兼容）：原样返回
+    private fun resolveSyncTarget(ctx: Context): String? {
+        val stored = SettingsStore.syncTarget(ctx)
+        if (stored.isBlank()) return null
+        val portPart = stored.substringAfter(':')
+        if (stored.contains(':') && portPart.toIntOrNull() != null) return stored
+        return Discovery.resolveTarget(stored, DEFAULT_PORT, SettingsStore.deviceName(ctx), "Android")?.addr
+    }
+
     // 后台自动同步（供空闲触发）：同步所有开启自动同步的文件夹
     fun startBackgroundSync(ctx: Context) {
         val app = ctx.applicationContext
@@ -150,8 +161,8 @@ object SyncManager {
         onDone: ((Int, Int) -> Unit)? = null,
         onFileSynced: ((Int, Int) -> Unit)? = null
     ) {
-        val target = SettingsStore.syncTarget(ctx)
-        if (target.isBlank()) { onDone?.invoke(0, 0); return }
+        val targetAddr = resolveSyncTarget(ctx)
+        if (targetAddr.isNullOrBlank()) { onDone?.invoke(0, 0); return }
         val source = listSource(ctx, Uri.parse(folder.uri))
         val synced = loadSynced(ctx, folder.id)
         val pending = source.filter { f ->
@@ -171,7 +182,7 @@ object SyncManager {
         // 此前已同步（不在本次待传列表里）的文件数
         val alreadySynced = source.size - pending.size
         var syncedSoFar = 0 // 本次已成功上传的计数
-        val sentCount = sendSync(ctx, target, dev, fol, pending, { done, name ->
+        val sentCount = sendSync(ctx, targetAddr, dev, fol, pending, { done, name ->
             onProgress?.invoke(done, total, name)
         }, { f ->
             synced[f.relPath] = Synced(f.mtime, f.size)
@@ -192,14 +203,14 @@ object SyncManager {
         folder: SettingsStore.SyncFolder,
         onDone: ((List<String>, Int) -> Unit)? = null
     ) {
-        val target = SettingsStore.syncTarget(ctx)
-        if (target.isBlank()) { onDone?.invoke(emptyList(), 0); return }
+        val targetAddr = resolveSyncTarget(ctx)
+        if (targetAddr.isNullOrBlank()) { onDone?.invoke(emptyList(), 0); return }
         val source = listSource(ctx, Uri.parse(folder.uri))
         val dev = safeFolder(SettingsStore.deviceName(ctx))
         val fol = safeFolder(folder.name)
 
         // 电脑端同步目录已有文件
-        val ip = target.substringBefore(':')
+        val ip = targetAddr.substringBefore(':')
         val remote = PcApi.listSyncFiles(ip, dev, fol)
         val remoteByRel = remote.associateBy { it.relPath }
 
@@ -208,11 +219,23 @@ object SyncManager {
         val extraFiles = remote.filter { it.relPath !in sourceRels }.map { it.relPath }
 
         // 待同步：手机有、电脑无，或 mtime/size 不同
-        val pendingCount = source.count { f ->
+        val pendingRels = source.filter { f ->
             val r = remoteByRel[f.relPath]
             r == null || r.mtime != f.mtime || r.size != f.size
+        }.map { it.relPath }.toSet()
+
+        // 重置核心修复：把待同步文件从本地已同步清单移除（遵循「不删传播」，多余文件不动），
+        // 使界面列表刷新出待同步数、点同步时能重传差异。
+        if (pendingRels.isNotEmpty()) {
+            val synced = loadSynced(ctx, folder.id)
+            var changed = false
+            for (rel in pendingRels) {
+                if (synced.remove(rel) != null) changed = true
+            }
+            if (changed) saveSynced(ctx, folder.id, synced)
         }
-        onDone?.invoke(extraFiles, pendingCount)
+
+        onDone?.invoke(extraFiles, pendingRels.size)
     }
 
     // 连接电脑 TCP 端口发送一批文件（带 sync 标志 + <设备名>/<源目录名>/<相对路径> 结构 + mtime），

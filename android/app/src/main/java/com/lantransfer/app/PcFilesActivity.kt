@@ -164,23 +164,15 @@ class PcFilesActivity : AppCompatActivity() {
     private fun resolveFile(uri: Uri): PendingFile {
         var name = "file"
         var size = 0L
-        var mtime = 0L
         contentResolver.query(uri, null, null, null, null)?.use { c ->
             if (c.moveToFirst()) {
                 val ni = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
                 if (ni >= 0) name = c.getString(ni) ?: name
                 val si = c.getColumnIndex(OpenableColumns.SIZE)
                 if (si >= 0 && !c.isNull(si)) size = c.getLong(si)
-                // MediaStore 来源：DATE_MODIFIED（秒）
-                val mi = c.getColumnIndex(MediaStore.MediaColumns.DATE_MODIFIED)
-                if (mi >= 0 && !c.isNull(mi)) mtime = c.getLong(mi)
-                // SAF document 来源：COLUMN_LAST_MODIFIED（毫秒）
-                if (mtime == 0L) {
-                    val li = c.getColumnIndex(DocumentsContract.Document.COLUMN_LAST_MODIFIED)
-                    if (li >= 0 && !c.isNull(li)) mtime = c.getLong(li) / 1000
-                }
             }
         }
+        val mtime = resolveFileMtime(this, uri)
         return PendingFile(uri, name, size, "", mtime)
     }
 
@@ -209,6 +201,14 @@ class PcFilesActivity : AppCompatActivity() {
                 contentResolver.update(uri, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null)
                 if (row.mtime > 0) {
                     contentResolver.update(uri, ContentValues().apply { put(MediaStore.MediaColumns.DATE_MODIFIED, row.mtime) }, null, null)
+                    // 抗 MediaStore 扫描覆盖：部分机型扫描在上方 update 之后异步回写「接收时间」，延迟二次写确保真实 mtime 落盘
+                    val m = row.mtime
+                    val u = uri
+                    android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                        try {
+                            contentResolver.update(u, ContentValues().apply { put(MediaStore.MediaColumns.DATE_MODIFIED, m) }, null, null)
+                        } catch (_: Exception) {}
+                    }, 500)
                 }
                 runOnUiThread { Toast.makeText(this, "接收完成 ${row.name}", Toast.LENGTH_SHORT).show() }
                 postDownloadDone(notifId, row.name, uri)

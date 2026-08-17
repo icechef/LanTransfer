@@ -70,10 +70,32 @@ func startWeb(addr string, s *webServer) error {
 	mux.HandleFunc("/api/browse", s.handleBrowse)
 	mux.HandleFunc("/api/upload-dir", s.handleUploadToDir)
 	mux.HandleFunc("/api/reset", s.handleReset)
+	mux.HandleFunc("/api/restart", s.handleRestart)
 	mux.HandleFunc("/api/transfer/cancel", s.handleTransferCancel)
 	mux.HandleFunc("/api/transfer/remove", s.handleTransferRemove)
 	mux.HandleFunc("/api/sync/list", s.handleSyncList)
 	return http.ListenAndServe(addr, mux)
+}
+
+// handleRestart 让运行中的实例自我重启（仅本机可触发）。
+// 先回写响应，再延迟一小段时间由 restartSelf 启动新进程并退出，确保响应已送达请求方。
+func (s *webServer) handleRestart(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.canManage(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		restartSelf()
+	}()
 }
 
 func (s *webServer) handleInfo(w http.ResponseWriter, r *http.Request) {
@@ -486,6 +508,11 @@ func (s *webServer) stageToCacheDir(it sendItem) (string, int64, error) {
 		return "", 0, err
 	}
 	defer src.Close()
+	srcInfo, err := src.Stat()
+	if err != nil {
+		return "", 0, err
+	}
+	srcMtime := srcInfo.ModTime()
 	f, err := os.Create(dst)
 	if err != nil {
 		return "", 0, err
@@ -495,6 +522,8 @@ func (s *webServer) stageToCacheDir(it sendItem) (string, int64, error) {
 	if err != nil {
 		return "", 0, err
 	}
+	// 保留源文件修改时间（中转文件 mtime 已由 applyLastModified 设好，io.Copy 后 dst 会变「现在」）
+	_ = os.Chtimes(dst, srcMtime, srcMtime)
 	return filepath.Base(dst), n, nil
 }
 

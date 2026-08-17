@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -43,6 +44,8 @@ func main() {
 		name     string
 		dir      string
 		serve    bool
+		restart  bool
+		tray     bool
 	)
 	host, _ := os.Hostname()
 	flag.IntVar(&port, "port", 53318, "TCP listen port (discovery + transfer)")
@@ -51,9 +54,21 @@ func main() {
 	flag.StringVar(&name, "name", host, "device name")
 	flag.StringVar(&dir, "dir", defaultReceiveDir(), "receive directory")
 	flag.BoolVar(&serve, "serve", false, "run as a background service (no stdin interaction)")
+	flag.BoolVar(&restart, "restart", false, "restart the running instance (send restart request to localhost)")
+	flag.BoolVar(&tray, "tray", false, "run minimized to system tray (Windows only)")
 	flag.Parse()
 	if scanPort == 0 {
 		scanPort = port
+	}
+
+	// 命令行重启运行中实例：向本机 HTTP 端口发重启请求后退出，由运行中的实例自我重启。
+	if restart {
+		if err := doRestartRequest(httpPort); err != nil {
+			fmt.Println("restart request failed (is the instance running?):", err)
+			os.Exit(1)
+		}
+		fmt.Println("已向运行中的实例发送重启请求")
+		os.Exit(0)
 	}
 
 	// 是否显式指定了 -name（显式指定则优先于持久化的设备别称）
@@ -132,6 +147,23 @@ func main() {
 	}
 	if extra > 0 {
 		fmt.Printf("  （另有 %d 个网卡地址，见网页控制台）\n", extra)
+	}
+
+	trayHTTPPort = httpPort
+	// Ctrl+C 退出前清理（托盘场景移除图标，避免幽灵图标）
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt)
+	go func() {
+		<-sigCh
+		if preRestart != nil {
+			preRestart()
+		}
+		os.Exit(0)
+	}()
+
+	if tray {
+		runTray()
+		return
 	}
 
 	if serve {

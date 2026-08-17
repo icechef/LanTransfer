@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"log"
 	"net"
 	"os"
 	"path/filepath"
@@ -348,6 +349,8 @@ func sendOne(conn net.Conn, it sendItem, fi, total int, onProgress func(int64), 
 	fileID := strconv.Itoa(fi)
 
 	meta := Header{Type: "file_meta", FileID: fileID, FileName: name, FileSize: st.Size(), FileIndex: fi, FileCount: total, RelPath: it.relPath, Mtime: st.ModTime().Unix()}
+	// 诊断日志：用于定位 web→手机 mtime 丢失（确认帧 Mtime 是源值还是「现在」）
+	log.Printf("[sendOne] %s mtime=%d size=%d", name, meta.Mtime, st.Size())
 	_ = conn.SetDeadline(time.Now().Add(60 * time.Second))
 	if err := writeFrame(conn, meta, nil); err != nil {
 		return err

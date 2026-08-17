@@ -197,6 +197,8 @@ class TransferService : Service() {
                         currentName = name
                         currentSize = h.fileSize
                         currentMtime = h.mtime
+                        // 诊断日志：用于定位 web→手机 mtime 丢失（确认收到的帧 Mtime 是源值还是「现在」）
+                        android.util.Log.d("LanTransfer", "file_meta receive name=${name} mtime=${h.mtime} from=${fromName}")
                         lastSpeedTime = 0L
                         lastSpeedWritten = 0L
                         taskId = nextNotifId()

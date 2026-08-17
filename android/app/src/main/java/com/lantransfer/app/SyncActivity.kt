@@ -172,9 +172,9 @@ class SyncActivity : AppCompatActivity() {
             SettingsStore.deviceName(this),
             "Android",
             onFound = { d ->
-                if (!d.isWeb) runOnUiThread {
-                    val selfIp = Discovery.primaryIP()
-                    if (d.ip != selfIp && !d.ip.startsWith("127.") && targetCandidates.none { it.addr == d.addr }) {
+                // 仅允许选择电脑（排除手机），按计算机名去重（同机多 IP 只列一次）
+                if (d.isPc) runOnUiThread {
+                    if (!d.ip.startsWith("127.") && targetCandidates.none { it.name == d.name }) {
                         targetCandidates.add(d)
                     }
                 }
@@ -194,7 +194,8 @@ class SyncActivity : AppCompatActivity() {
         AlertDialog.Builder(this)
             .setTitle("选择目标电脑")
             .setItems(names) { _, which ->
-                SettingsStore.setSyncTarget(this, targetCandidates[which].addr)
+                // 锁定计算机名（而非 ip），IP 变化后仍能解析到同一台电脑
+                SettingsStore.setSyncTarget(this, targetCandidates[which].name)
                 targetCandidates.clear()
                 refreshTarget()
             }
