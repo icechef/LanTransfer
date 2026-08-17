@@ -9,7 +9,8 @@ import java.net.Socket
 import java.security.MessageDigest
 import java.util.concurrent.Executors
 
-// 目录同步（手机 → 电脑）：选定源目录后，以 relPath=同步_<设备名>/<相对路径> 增量发送到电脑 TCP 端口。
+// 目录同步（手机 → 电脑）：支持多个源文件夹，文件以 relPath=<设备名>/<源目录名>/<相对路径>
+// 增量发送到电脑 TCP 端口（file_meta 带 sync 标志，电脑端落到专用同步目录）。
 // 单向镜像：仅上传新增/变更文件（按 relPath + mtime + size 判定），不做删除传播（安全）。
 object SyncManager {
 
@@ -20,7 +21,7 @@ object SyncManager {
     private val executor = Executors.newSingleThreadExecutor()
 
     // 文件夹名去非法字符（Windows 文件名不允许 \ / : * ? " < > |）
-    private fun safeFolder(name: String): String =
+    fun safeFolder(name: String): String =
         name.replace(Regex("[\\\\/:*?\"<>|]"), "_").trim().ifEmpty { "设备" }
 
     // 递归列出 SAF 目录树下所有文件（相对路径 + 大小 + 修改时间）
@@ -62,10 +63,10 @@ object SyncManager {
         return out
     }
 
-    private fun loadSynced(ctx: Context): MutableMap<String, Synced> {
+    private fun loadSynced(ctx: Context, folderId: String): MutableMap<String, Synced> {
         val map = mutableMapOf<String, Synced>()
         try {
-            val o = JSONObject(SettingsStore.syncMap(ctx))
+            val o = JSONObject(SettingsStore.syncMap(ctx, folderId))
             val keys = o.keys()
             while (keys.hasNext()) {
                 val k = keys.next()
@@ -76,18 +77,16 @@ object SyncManager {
         return map
     }
 
-    private fun saveSynced(ctx: Context, map: Map<String, Synced>) {
+    private fun saveSynced(ctx: Context, folderId: String, map: Map<String, Synced>) {
         val o = JSONObject()
         for ((k, v) in map) o.put(k, JSONObject().put("mtime", v.mtime).put("size", v.size))
-        SettingsStore.setSyncMap(ctx, o.toString())
+        SettingsStore.setSyncMap(ctx, folderId, o.toString())
     }
 
-    // 同步状态快照（已同步/总数/待同步），会遍历源目录，需在后台线程调用
-    fun computeStatus(ctx: Context): SyncStatus {
-        val treeStr = SettingsStore.syncTreeUri(ctx)
-        if (treeStr.isEmpty()) return SyncStatus(0, 0, 0)
-        val source = listSource(ctx, Uri.parse(treeStr))
-        val synced = loadSynced(ctx)
+    // 单个文件夹的同步状态快照（已同步/总数/待同步），会遍历源目录，需在后台线程调用
+    fun computeFolderStatus(ctx: Context, folder: SettingsStore.SyncFolder): SyncStatus {
+        val source = listSource(ctx, Uri.parse(folder.uri))
+        val synced = loadSynced(ctx, folder.id)
         var syncedCount = 0
         for (f in source) {
             val e = synced[f.relPath]
@@ -96,31 +95,49 @@ object SyncManager {
         return SyncStatus(source.size, syncedCount, source.size - syncedCount)
     }
 
-    // 后台自动同步（供空闲触发）
+    // 后台自动同步（供空闲触发）：同步所有开启自动同步的文件夹
     fun startBackgroundSync(ctx: Context) {
         val app = ctx.applicationContext
         executor.execute {
-            SyncManager.syncOnce(app, null) { sent, failed ->
-                SyncNotifications.postResult(app, sent, failed)
+            val folders = SettingsStore.syncFolders(app).filter { it.enabled }
+            var sent = 0
+            var failed = 0
+            for (f in folders) {
+                syncFolder(app, f, null) { s, fl -> sent += s; failed += fl }
             }
+            SyncNotifications.postResult(app, sent, failed)
         }
     }
 
-    // 执行一次增量同步（需在后台线程调用）。
-    // onProgress(done, total, 当前文件名)；onDone(成功数, 失败数)。
-    fun syncOnce(
+    // 同步所有开启的文件夹（手动「全部同步」），需在后台线程调用
+    fun syncAllEnabled(
         ctx: Context,
         onProgress: ((Long, Long, String) -> Unit)? = null,
         onDone: ((Int, Int) -> Unit)? = null
     ) {
-        val treeStr = SettingsStore.syncTreeUri(ctx)
-        val target = SettingsStore.syncTarget(ctx)
-        if (treeStr.isEmpty() || target.isBlank()) {
-            onDone?.invoke(0, 0)
-            return
+        val folders = SettingsStore.syncFolders(ctx).filter { it.enabled }
+        if (folders.isEmpty()) { onDone?.invoke(0, 0); return }
+        var sent = 0
+        var failed = 0
+        for (f in folders) {
+            syncFolder(ctx, f, onProgress) { s, fl -> sent += s; failed += fl }
         }
-        val source = listSource(ctx, Uri.parse(treeStr))
-        val synced = loadSynced(ctx)
+        SettingsStore.setSyncLast(ctx, System.currentTimeMillis())
+        onDone?.invoke(sent, failed)
+    }
+
+    // 增量同步单个文件夹（需在后台线程调用）。
+    // onProgress(done, total, 当前文件名)；onDone(成功数, 失败数)。
+    fun syncFolder(
+        ctx: Context,
+        folder: SettingsStore.SyncFolder,
+        onProgress: ((Long, Long, String) -> Unit)? = null,
+        onDone: ((Int, Int) -> Unit)? = null
+    ) {
+        val target = SettingsStore.syncTarget(ctx)
+        if (target.isBlank()) { onDone?.invoke(0, 0); return }
+        val source = listSource(ctx, Uri.parse(folder.uri))
+        val synced = loadSynced(ctx, folder.id)
         val pending = source.filter { f ->
             val e = synced[f.relPath]
             e == null || e.mtime != f.mtime || e.size != f.size
@@ -131,25 +148,87 @@ object SyncManager {
             onDone?.invoke(0, 0)
             return
         }
-        val deviceName = SettingsStore.deviceName(ctx)
+        val dev = safeFolder(SettingsStore.deviceName(ctx))
+        val fol = safeFolder(folder.name)
         val total = pending.sumOf { it.size }
-        val sentCount = sendSync(ctx, target, pending, deviceName, { done, name ->
+        val sentCount = sendSync(ctx, target, dev, fol, pending, { done, name ->
             onProgress?.invoke(done, total, name)
         }) { f ->
             synced[f.relPath] = Synced(f.mtime, f.size)
         }
-        saveSynced(ctx, synced)
+        saveSynced(ctx, folder.id, synced)
         SettingsStore.setSyncLast(ctx, System.currentTimeMillis())
         onProgress?.invoke(total, total, "")
         onDone?.invoke(sentCount, pending.size - sentCount)
     }
 
-    // 连接电脑 TCP 端口发送一批文件（带 同步_ 前缀 + mtime），返回成功发送的文件数
+    // 扫描重置：清空同步进度，重新做目录校验；若电脑端同步目录存在「多余文件」（源里已删），
+    // 通过 onDone 的第三个参数返回相对路径列表，供界面提示。
+    // onProgress(done, total, 当前文件名)；onDone(成功数, 失败数, 多余文件列表)。
+    fun scanReset(
+        ctx: Context,
+        folder: SettingsStore.SyncFolder,
+        onProgress: ((Long, Long, String) -> Unit)? = null,
+        onDone: ((Int, Int, List<String>) -> Unit)? = null
+    ) {
+        val target = SettingsStore.syncTarget(ctx)
+        if (target.isBlank()) { onDone?.invoke(0, 0, emptyList()); return }
+        val source = listSource(ctx, Uri.parse(folder.uri))
+        val dev = safeFolder(SettingsStore.deviceName(ctx))
+        val fol = safeFolder(folder.name)
+
+        // 重置进度
+        saveSynced(ctx, folder.id, emptyMap())
+
+        // 电脑端同步目录已有文件
+        val ip = target.substringBefore(':')
+        val remote = PcApi.listSyncFiles(ip, dev, fol)
+        val remoteByRel = remote.associateBy { it.relPath }
+
+        // 多余文件：电脑端有、手机源里没有（源里删除后遗留）
+        val sourceRels = source.map { it.relPath }.toSet()
+        val extraFiles = remote.filter { it.relPath !in sourceRels }.map { it.relPath }
+
+        // 待上传：手机有、电脑无，或 mtime/size 不同
+        val toUpload = source.filter { f ->
+            val r = remoteByRel[f.relPath]
+            r == null || r.mtime != f.mtime || r.size != f.size
+        }
+
+        // 记录本次成功上传的文件，最终同步清单 = 电脑端已一致的文件 + 刚上传成功的文件
+        val uploaded = mutableSetOf<String>()
+        if (toUpload.isNotEmpty()) {
+            val total = toUpload.sumOf { it.size }
+            val sentCount = sendSync(ctx, target, dev, fol, toUpload, { done, name ->
+                onProgress?.invoke(done, total, name)
+            }) { f -> uploaded.add(f.relPath) }
+            onProgress?.invoke(total, total, "")
+            val newMap = mutableMapOf<String, Synced>()
+            for (f in source) {
+                val r = remoteByRel[f.relPath]
+                if ((r != null && r.mtime == f.mtime && r.size == f.size) || f.relPath in uploaded) {
+                    newMap[f.relPath] = Synced(f.mtime, f.size)
+                }
+            }
+            saveSynced(ctx, folder.id, newMap)
+            SettingsStore.setSyncLast(ctx, System.currentTimeMillis())
+            onDone?.invoke(sentCount, toUpload.size - sentCount, extraFiles)
+        } else {
+            val newMap = source.associate { it.relPath to Synced(it.mtime, it.size) }
+            saveSynced(ctx, folder.id, newMap)
+            SettingsStore.setSyncLast(ctx, System.currentTimeMillis())
+            onDone?.invoke(0, 0, extraFiles)
+        }
+    }
+
+    // 连接电脑 TCP 端口发送一批文件（带 sync 标志 + <设备名>/<源目录名>/<相对路径> 结构 + mtime），
+    // 返回成功发送的文件数；onFileDone 每成功一个文件回调一次。
     private fun sendSync(
         ctx: Context,
         target: String,
+        device: String,
+        folder: String,
         files: List<PendingFile>,
-        deviceName: String,
         onProgress: (Long, String) -> Unit,
         onFileDone: (PendingFile) -> Unit
     ): Int {
@@ -157,7 +236,7 @@ object SyncManager {
         val port = target.substringAfter(':').toIntOrNull() ?: DEFAULT_PORT
         var done = 0L
         var sentCount = 0
-        val prefix = "同步_${safeFolder(deviceName)}"
+        val prefix = "$device/$folder"
         return try {
             val s = Socket()
             try {
@@ -166,7 +245,7 @@ object SyncManager {
                 s.soTimeout = 30000
                 val out = s.getOutputStream()
                 val input = s.getInputStream()
-                Protocol.write(out, Protocol.hello(deviceName, "Android"))
+                Protocol.write(out, Protocol.hello(SettingsStore.deviceName(ctx), "Android"))
                 if (Protocol.read(input) == null) return sentCount
                 for ((index, f) in files.withIndex()) {
                     val meta = Protocol.Header().apply {
@@ -178,6 +257,7 @@ object SyncManager {
                         fileCount = files.size
                         relPath = "$prefix/${f.relPath}"
                         mtime = f.mtime
+                        sync = true
                     }
                     Protocol.write(out, meta)
                     val ack = Protocol.read(input)

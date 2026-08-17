@@ -31,7 +31,19 @@ object ReceiveStorage {
     ) {
         // 落盘完成（MD5 校验已通过）：.part → 最终名，清 pending，还原修改时间
         fun commit(ctx: Context) {
-            if (pending || saf) return
+            if (pending) return
+            if (saf) {
+                // SAF 文档没有标准写 mtime 的接口，尽力而为（部分 provider 支持 update）
+                if (mtime > 0) {
+                    try {
+                        val v = ContentValues().apply {
+                            put(DocumentsContract.Document.COLUMN_LAST_MODIFIED, mtime * 1000)
+                        }
+                        ctx.contentResolver.update(uri!!, v, null, null)
+                    } catch (_: Exception) {}
+                }
+                return
+            }
             try {
                 val v = ContentValues().apply {
                     put(MediaStore.MediaColumns.DISPLAY_NAME, name)

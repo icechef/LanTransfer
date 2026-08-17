@@ -144,6 +144,11 @@
       <span style="font-size:13px;color:var(--muted);">缓存目录</span>
       <input id="cacheInput" type="text" style="flex:1;border:1px solid var(--border);border-radius:8px;padding:6px 8px;font-size:13px;">
     </div>
+    <div class="row" style="margin-bottom:10px;">
+      <span style="font-size:13px;color:var(--muted);">同步目录</span>
+      <input id="syncInput" type="text" style="flex:1;border:1px solid var(--border);border-radius:8px;padding:6px 8px;font-size:13px;">
+    </div>
+    <div class="hint" style="margin:0 0 10px;">手机「目录同步」的文件统一保存到此目录下的「设备名/源目录/…」路径。</div>
     <label style="font-size:13px;display:flex;align-items:center;gap:6px;margin-bottom:10px;">
       <input type="checkbox" id="autoSaveChk"> 自动保存到接收目录
     </label>
@@ -748,6 +753,7 @@ async function loadSettings() {
     const r = await fetch('/api/settings'); const d = await r.json();
     $('dirInput').value = d.receiveDir || '';
     $('cacheInput').value = d.cacheDir || '';
+    $('syncInput').value = d.syncDir || '';
     $('autoSaveChk').checked = d.autoSave !== false;
     const p = d.remotePerms || {};
     $('permViewShares').checked = p.viewSharedFolders !== false;
@@ -758,9 +764,10 @@ async function loadSettings() {
 $('saveSettingsBtn').onclick = async () => {
   const receiveDir = $('dirInput').value.trim();
   const cacheDir = $('cacheInput').value.trim();
+  const syncDir = $('syncInput').value.trim();
   const autoSave = $('autoSaveChk').checked;
   try {
-    const r = await fetch('/api/settings', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ receiveDir, cacheDir, autoSave }) });
+    const r = await fetch('/api/settings', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ receiveDir, cacheDir, syncDir, autoSave }) });
     const d = await r.json();
     if (d.ok) { toast('设置已保存'); loadInfo(); }
     else toast('保存失败：'+(d.error||''));

@@ -19,6 +19,8 @@ object SettingsStore {
     private const val KEY_SYNC_ENABLED = "sync_enabled"
     private const val KEY_SYNC_MAP = "sync_map"
     private const val KEY_SYNC_LAST = "sync_last"
+    private const val KEY_SYNC_FOLDERS = "sync_folders"
+    private const val KEY_SYNC_MAP_PREFIX = "sync_map_"
 
     private fun prefs(ctx: Context) = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
@@ -66,12 +68,8 @@ object SettingsStore {
 
     // ---- 目录同步（手机 → 电脑）----
 
-    // 同步源目录（SAF tree uri），空串表示未设置
-    fun syncTreeUri(ctx: Context): String = prefs(ctx).getString(KEY_SYNC_TREE, "") ?: ""
-
-    fun setSyncTreeUri(ctx: Context, uri: String) {
-        prefs(ctx).edit().putString(KEY_SYNC_TREE, uri).apply()
-    }
+    // 同步源文件夹配置
+    data class SyncFolder(val id: String, val uri: String, val name: String, val enabled: Boolean)
 
     // 同步目标电脑（"ip:port"），空串表示未设置
     fun syncTarget(ctx: Context): String = prefs(ctx).getString(KEY_SYNC_TARGET, "") ?: ""
@@ -80,18 +78,51 @@ object SettingsStore {
         prefs(ctx).edit().putString(KEY_SYNC_TARGET, addr.trim()).apply()
     }
 
-    // 是否空闲时自动同步
-    fun syncEnabled(ctx: Context): Boolean = prefs(ctx).getBoolean(KEY_SYNC_ENABLED, false)
-
-    fun setSyncEnabled(ctx: Context, on: Boolean) {
-        prefs(ctx).edit().putBoolean(KEY_SYNC_ENABLED, on).apply()
+    // 同步文件夹列表（多文件夹）；首次读取时迁移旧版单文件夹配置
+    fun syncFolders(ctx: Context): List<SyncFolder> {
+        val json = prefs(ctx).getString(KEY_SYNC_FOLDERS, "")
+        val list = if (json.isNullOrEmpty()) emptyList() else parseSyncFolders(json)
+        if (list.isEmpty()) {
+            val oldTree = prefs(ctx).getString(KEY_SYNC_TREE, "")
+            if (!oldTree.isNullOrEmpty()) {
+                val old = SyncFolder(
+                    "legacy", oldTree,
+                    "源目录", prefs(ctx).getBoolean(KEY_SYNC_ENABLED, false)
+                )
+                setSyncFolders(ctx, listOf(old))
+                return listOf(old)
+            }
+        }
+        return list
     }
 
-    // 已同步文件清单（relPath -> {"mtime":x,"size":y} 的 JSON 字符串）
-    fun syncMap(ctx: Context): String = prefs(ctx).getString(KEY_SYNC_MAP, "{}") ?: "{}"
+    fun setSyncFolders(ctx: Context, list: List<SyncFolder>) {
+        val arr = org.json.JSONArray()
+        for (f in list) {
+            arr.put(org.json.JSONObject()
+                .put("id", f.id)
+                .put("uri", f.uri)
+                .put("name", f.name)
+                .put("enabled", f.enabled))
+        }
+        prefs(ctx).edit().putString(KEY_SYNC_FOLDERS, arr.toString()).apply()
+    }
 
-    fun setSyncMap(ctx: Context, json: String) {
-        prefs(ctx).edit().putString(KEY_SYNC_MAP, json).apply()
+    private fun parseSyncFolders(json: String): List<SyncFolder> {
+        val out = mutableListOf<SyncFolder>()
+        try {
+            val arr = org.json.JSONArray(json)
+            for (i in 0 until arr.length()) {
+                val o = arr.getJSONObject(i)
+                out.add(SyncFolder(
+                    o.optString("id"),
+                    o.optString("uri"),
+                    o.optString("name"),
+                    o.optBoolean("enabled", false)
+                ))
+            }
+        } catch (_: Exception) {}
+        return out
     }
 
     // 上次同步完成时间（epoch millis）
@@ -99,5 +130,13 @@ object SettingsStore {
 
     fun setSyncLast(ctx: Context, millis: Long) {
         prefs(ctx).edit().putLong(KEY_SYNC_LAST, millis).apply()
+    }
+
+    // 单个文件夹的已同步文件清单（relPath -> {"mtime":x,"size":y} 的 JSON 字符串）
+    fun syncMap(ctx: Context, folderId: String): String =
+        prefs(ctx).getString(KEY_SYNC_MAP_PREFIX + folderId, "{}") ?: "{}"
+
+    fun setSyncMap(ctx: Context, folderId: String, json: String) {
+        prefs(ctx).edit().putString(KEY_SYNC_MAP_PREFIX + folderId, json).apply()
     }
 }

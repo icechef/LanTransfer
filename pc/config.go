@@ -25,6 +25,7 @@ type RemotePermissions struct {
 type AppConfig struct {
 	ReceiveDir    string            `json:"receiveDir"`    // 接收目录（真正收到的文件）
 	CacheDir      string            `json:"cacheDir"`      // 缓存目录（上传暂存 + 网页中转）
+	SyncDir       string            `json:"syncDir"`       // 同步目录（手机目录同步的专用落盘目录）
 	AutoSave      bool              `json:"autoSave"`      // 是否自动保存（关闭则收到文件先进入待确认区）
 	DeviceName    string            `json:"deviceName"`    // 设备别称（网页端设置，覆盖主机名）
 	SharedFolders []SharedFolder    `json:"sharedFolders"` // 共享给手机的文件夹
@@ -55,6 +56,7 @@ func loadConfig(initialDir string) AppConfig {
 			}
 			cfg.AutoSave = saved.AutoSave
 			cfg.CacheDir = saved.CacheDir
+			cfg.SyncDir = saved.SyncDir
 			cfg.DeviceName = saved.DeviceName
 			cfg.SharedFolders = saved.SharedFolders
 			cfg.RemotePerms = saved.RemotePerms
@@ -67,6 +69,10 @@ func loadConfig(initialDir string) AppConfig {
 	// 首次运行默认缓存目录为接收目录下的 .cache 子目录，之后作为独立字段持久化
 	if cfg.CacheDir == "" {
 		cfg.CacheDir = filepath.Join(cfg.ReceiveDir, ".cache")
+	}
+	// 同步目录默认也是接收目录下的「同步」子目录，之后可单独配置
+	if cfg.SyncDir == "" {
+		cfg.SyncDir = filepath.Join(cfg.ReceiveDir, "同步")
 	}
 	configMu.Lock()
 	config = cfg
@@ -112,6 +118,19 @@ func setDeviceName(name string) {
 	configMu.Lock()
 	defer configMu.Unlock()
 	config.DeviceName = name
+	persistLocked()
+}
+
+// setSyncDir 更新并持久化同步目录。
+func setSyncDir(path string) {
+	configMu.Lock()
+	defer configMu.Unlock()
+	config.SyncDir = path
+	persistLocked()
+}
+
+// persistLocked 在持有 configMu 锁时把配置写盘。
+func persistLocked() {
 	if data, err := json.MarshalIndent(config, "", "  "); err == nil {
 		_ = os.WriteFile(configPath(), data, 0o644)
 	}

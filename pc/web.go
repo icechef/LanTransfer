@@ -72,6 +72,7 @@ func startWeb(addr string, s *webServer) error {
 	mux.HandleFunc("/api/reset", s.handleReset)
 	mux.HandleFunc("/api/transfer/cancel", s.handleTransferCancel)
 	mux.HandleFunc("/api/transfer/remove", s.handleTransferRemove)
+	mux.HandleFunc("/api/sync/list", s.handleSyncList)
 	return http.ListenAndServe(addr, mux)
 }
 
@@ -497,7 +498,9 @@ func (s *webServer) stageToCacheDir(it sendItem) (string, int64, error) {
 	return filepath.Base(dst), n, nil
 }
 
-// filterSelfTargets 过滤掉空目标与本机目标
+// filterSelfTargets 过滤掉空目标与本机回环地址。
+// 注意：不再用 isLocalIP 过滤本机局域网 IP —— 远程网页端向「主机」发送时，
+// 目标地址正是主机自己的局域网 IP，若按 isLocalIP 过滤会导致「无有效设备」。
 func filterSelfTargets(list []string) []string {
 	var out []string
 	for _, t := range list {
@@ -506,7 +509,7 @@ func filterSelfTargets(list []string) []string {
 			continue
 		}
 		if host, _, err := net.SplitHostPort(t); err == nil {
-			if ip := net.ParseIP(host); ip != nil && isLocalIP(ip) {
+			if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
 				continue
 			}
 		}
@@ -858,6 +861,53 @@ func (s *webServer) handleTransferRemove(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, map[string]any{"ok": true})
 }
 
+// handleSyncList 列出同步目录下某设备/某源目录内的所有文件（相对路径 + 大小 + 修改时间），
+// 供手机端「扫描重置」时做目录校验、检测电脑端多余文件。
+// GET /api/sync/list?device=<设备名>&folder=<源目录名>
+func (s *webServer) handleSyncList(w http.ResponseWriter, r *http.Request) {
+	if !s.canManage(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	device := sanitizeName(r.URL.Query().Get("device"))
+	folder := sanitizeName(r.URL.Query().Get("folder"))
+	if device == "" || device == "unnamed" || folder == "" || folder == "unnamed" {
+		writeJSON(w, map[string]any{"ok": true, "files": []any{}})
+		return
+	}
+	base := filepath.Join(getConfig().SyncDir, device, folder)
+	files := listSyncTree(base)
+	writeJSON(w, map[string]any{"ok": true, "files": files})
+}
+
+// listSyncTree 递归列出目录下所有文件，返回相对 base 的路径、大小与修改时间。
+func listSyncTree(base string) []map[string]any {
+	out := make([]map[string]any, 0)
+	_ = filepath.WalkDir(base, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(base, path)
+		if err != nil {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		out = append(out, map[string]any{
+			"relPath": filepath.ToSlash(rel),
+			"size":    info.Size(),
+			"mtime":   info.ModTime().Unix(),
+		})
+		return nil
+	})
+	sort.Slice(out, func(i, j int) bool {
+		return out[i]["relPath"].(string) < out[j]["relPath"].(string)
+	})
+	return out
+}
+
 // handleSettings 读取或更新配置（接收目录 + 缓存目录 + 自动保存开关 + 远程权限）。
 func (s *webServer) handleSettings(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
@@ -868,6 +918,7 @@ func (s *webServer) handleSettings(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			ReceiveDir  string            `json:"receiveDir"`
 			CacheDir    string            `json:"cacheDir"`
+			SyncDir     string            `json:"syncDir"`
 			AutoSave    bool              `json:"autoSave"`
 			RemotePerms *RemotePermissions `json:"remotePerms"`
 		}
@@ -880,19 +931,26 @@ func (s *webServer) handleSettings(w http.ResponseWriter, r *http.Request) {
 			setRemotePerms(*req.RemotePerms)
 			cfg = getConfig()
 		}
+		if strings.TrimSpace(req.SyncDir) != "" {
+			setSyncDir(strings.TrimSpace(req.SyncDir))
+			cfg = getConfig()
+		}
 		if req.ReceiveDir != "" {
 			_ = os.MkdirAll(cfg.ReceiveDir, 0o755)
 		}
 		if req.CacheDir != "" {
 			_ = os.MkdirAll(cfg.CacheDir, 0o755)
 		}
+		if cfg.SyncDir != "" {
+			_ = os.MkdirAll(cfg.SyncDir, 0o755)
+		}
 		s.receiveDir = cfg.ReceiveDir
 		s.cacheDir = cfg.CacheDir
-		writeJSON(w, map[string]any{"ok": true, "receiveDir": cfg.ReceiveDir, "cacheDir": cfg.CacheDir, "autoSave": cfg.AutoSave, "remotePerms": cfg.RemotePerms})
+		writeJSON(w, map[string]any{"ok": true, "receiveDir": cfg.ReceiveDir, "cacheDir": cfg.CacheDir, "syncDir": cfg.SyncDir, "autoSave": cfg.AutoSave, "remotePerms": cfg.RemotePerms})
 		return
 	}
 	cfg := getConfig()
-	writeJSON(w, map[string]any{"receiveDir": cfg.ReceiveDir, "cacheDir": cfg.CacheDir, "autoSave": cfg.AutoSave, "remotePerms": cfg.RemotePerms})
+	writeJSON(w, map[string]any{"receiveDir": cfg.ReceiveDir, "cacheDir": cfg.CacheDir, "syncDir": cfg.SyncDir, "autoSave": cfg.AutoSave, "remotePerms": cfg.RemotePerms})
 }
 
 // handlePending 列出待确认接收区的文件（关闭自动保存时收到）。

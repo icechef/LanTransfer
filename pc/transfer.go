@@ -44,6 +44,12 @@ func serveConn(conn net.Conn, reg *DeviceRegistry, selfType string) {
 		receiveLoop(conn, h.DeviceName)
 		return
 	}
+	// 自连接（本机发给自己，如远程网页端向主机发送时服务器连自己的监听端口）不注册，
+	// 避免把自己加入设备列表；但照常接收落盘。
+	if peerIP == primaryIP() {
+		receiveLoop(conn, h.DeviceName)
+		return
+	}
 	peer := Device{Name: h.DeviceName, Type: h.DeviceType, IP: peerIP}
 	if h.Port > 0 {
 		peer.Port = h.Port
@@ -114,19 +120,27 @@ func receiveLoop(conn net.Conn, peerName string) {
 	var size, written int64
 	var taskID string
 	var mtime int64
+	var active bool // 当前是否有未收完的文件
 	var hash hash.Hash
 	var partPath, finalPath string
 
+	// 连接级清理：异常退出（断连/读超时/取消）时丢弃半成品并把任务标记为失败，
+	// 避免网页端进度条卡在 running。
+	defer func() {
+		if f != nil {
+			_ = f.Close()
+			_ = os.Remove(partPath)
+		}
+		if active && taskID != "" {
+			transfers.finish(taskID, "error", "连接中断")
+		}
+	}()
+
 	for {
-		// 读超时：发送端长时间停滞（断网/挂起）时及时释放连接与临时文件
-		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Minute))
+		// 读超时：对端长时间停滞（断网/挂起）时快速失败，避免进度条卡死
+		_ = conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 		h, payload, err := readFrame(conn)
 		if err != nil {
-			if f != nil {
-				_ = f.Close()
-				f = nil
-				_ = os.Remove(partPath) // 断点续传已移除：断连即丢弃半成品
-			}
 			return
 		}
 		switch h.Type {
@@ -137,11 +151,17 @@ func receiveLoop(conn net.Conn, peerName string) {
 			if f != nil {
 				_ = f.Close()
 				f = nil
-				_ = os.Remove(partPath) // 前一个未收完的文件被新 file_meta 取代
+				_ = os.Remove(partPath)
+				if active && taskID != "" {
+					transfers.finish(taskID, "error", "interrupted")
+					active = false
+				}
 			}
 			cfg := getConfig()
 			dir := cfg.ReceiveDir
-			if !cfg.AutoSave {
+			if h.Sync {
+				dir = cfg.SyncDir // 目录同步落到专用同步目录
+			} else if !cfg.AutoSave {
 				dir = filepath.Join(cfg.ReceiveDir, ".pending")
 			}
 			_ = os.MkdirAll(dir, 0o755)
@@ -170,6 +190,7 @@ func receiveLoop(conn net.Conn, peerName string) {
 			f = nf
 			size = h.FileSize
 			taskID = transfers.create("receive", name, peerName, h.FileSize).ID
+			active = true
 			if err := writeFrame(conn, Header{Type: "ack"}, nil); err != nil {
 				return
 			}
@@ -194,6 +215,7 @@ func receiveLoop(conn net.Conn, peerName string) {
 				if written != size {
 					_ = os.Remove(partPath)
 					transfers.finish(taskID, "error", "received size mismatch")
+					active = false
 					_ = writeFrame(conn, Header{Type: "error", Message: "received size mismatch"}, nil)
 					return
 				}
@@ -202,6 +224,7 @@ func receiveLoop(conn net.Conn, peerName string) {
 					if got := hex.EncodeToString(hash.Sum(nil)); got != h.MD5 {
 						_ = os.Remove(partPath)
 						transfers.finish(taskID, "error", "md5 mismatch")
+						active = false
 						_ = writeFrame(conn, Header{Type: "error", Message: "md5 mismatch"}, nil)
 						return
 					}
@@ -211,6 +234,7 @@ func receiveLoop(conn net.Conn, peerName string) {
 				if err := os.Rename(partPath, finalPath); err != nil {
 					_ = os.Remove(partPath)
 					transfers.finish(taskID, "error", err.Error())
+					active = false
 					_ = writeFrame(conn, Header{Type: "error", Message: err.Error()}, nil)
 					return
 				}
@@ -219,6 +243,7 @@ func receiveLoop(conn net.Conn, peerName string) {
 					_ = os.Chtimes(finalPath, time.Unix(mtime, 0), time.Unix(mtime, 0))
 				}
 			}
+			active = false
 			transfers.finish(taskID, "done", "")
 			if err := writeFrame(conn, Header{Type: "ack"}, nil); err != nil {
 				return

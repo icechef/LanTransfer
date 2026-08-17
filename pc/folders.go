@@ -190,6 +190,7 @@ func (s *webServer) handleUploadToDir(w http.ResponseWriter, r *http.Request) {
 	}
 	files := r.MultipartForm.File["files"]
 	relpaths := r.MultipartForm.Value["relpaths"]
+	lastModified := r.MultipartForm.Value["lastModified"]
 	n := 0
 	for i, fh := range files {
 		rel := ""
@@ -212,6 +213,10 @@ func (s *webServer) handleUploadToDir(w http.ResponseWriter, r *http.Request) {
 			n++
 		}
 		src.Close()
+		// 还原源文件的修改时间（PcApi 上传时透传 lastModified，毫秒时间戳）
+		if i < len(lastModified) {
+			applyLastModified(dst, lastModified[i])
+		}
 	}
 	writeJSON(w, map[string]any{"ok": n > 0, "count": n})
 }

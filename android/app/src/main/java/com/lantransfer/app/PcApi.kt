@@ -16,6 +16,28 @@ object PcApi {
     data class Folder(val name: String, val path: String, val readonly: Boolean, val kind: String)
     data class DirEntry(val name: String, val isDir: Boolean, val size: Long, val mtime: Long)
     data class BrowseResult(val path: String, val writable: Boolean, val entries: List<DirEntry>)
+    // 电脑同步目录里的一个文件（相对路径 + 大小 + 修改时间），用于「扫描重置」校验
+    data class SyncRemoteFile(val relPath: String, val size: Long, val mtime: Long)
+
+    // 列出电脑同步目录下某设备/某源目录内的文件（供「扫描重置」校验）
+    fun listSyncFiles(ip: String, device: String, folder: String): List<SyncRemoteFile> {
+        val url = "${base(ip)}/api/sync/list?device=${Uri.encode(device)}&folder=${Uri.encode(folder)}"
+        val body = httpGet(url) ?: return emptyList()
+        return try {
+            val o = JSONObject(String(body))
+            val out = mutableListOf<SyncRemoteFile>()
+            val arr = o.optJSONArray("files") ?: return emptyList()
+            for (i in 0 until arr.length()) {
+                val e = arr.getJSONObject(i)
+                out.add(SyncRemoteFile(
+                    e.optString("relPath"),
+                    e.optLong("size"),
+                    e.optLong("mtime")
+                ))
+            }
+            out
+        } catch (_: Exception) { emptyList() }
+    }
 
     private fun base(ip: String) = "http://$ip:$DEFAULT_HTTP_PORT"
 
@@ -202,6 +224,13 @@ object PcApi {
                     dos.writeBytes("--$boundary\r\n")
                     dos.writeBytes("Content-Disposition: form-data; name=\"relpaths\"\r\n\r\n")
                     dos.write(rel.toByteArray(Charsets.UTF_8))
+                    dos.writeBytes("\r\n")
+                }
+                for (f in files) {
+                    val lm = if (f.mtime > 0) (f.mtime * 1000).toString() else ""
+                    dos.writeBytes("--$boundary\r\n")
+                    dos.writeBytes("Content-Disposition: form-data; name=\"lastModified\"\r\n\r\n")
+                    dos.write(lm.toByteArray(Charsets.UTF_8))
                     dos.writeBytes("\r\n")
                 }
                 dos.writeBytes("--$boundary--\r\n")

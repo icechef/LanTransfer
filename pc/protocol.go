@@ -35,6 +35,7 @@ type Header struct {
 	RelPath    string `json:"relPath,omitempty"`
 	MD5        string `json:"md5,omitempty"`    // file_end 时整文件 MD5（32 位小写 hex）
 	Mtime      int64  `json:"mtime,omitempty"`  // file_meta 时源文件修改时间（Unix 秒）
+	Sync       bool   `json:"sync,omitempty"`   // file_meta 时为目录同步传输（落到同步专用目录）
 	Offset     int64  `json:"offset,omitempty"` // 已废弃（断点续传移除），仅向后兼容
 }
 

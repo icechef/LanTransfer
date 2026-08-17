@@ -30,6 +30,7 @@ object Protocol {
         var relPath: String? = null
         var md5: String? = null      // file_end 时整文件 MD5（32 位小写 hex）
         var mtime: Long = 0          // file_meta 时源文件修改时间（Unix 秒）
+        var sync: Boolean = false    // file_meta 时为目录同步传输（落到电脑同步专用目录）
         var offset: Long = 0         // 已废弃（断点续传移除），仅向后兼容
 
         fun toJson(): JSONObject {
@@ -54,6 +55,7 @@ object Protocol {
             relPath?.let { o.put("relPath", it) }
             md5?.let { o.put("md5", it) }
             if (mtime != 0L) o.put("mtime", mtime)
+            if (sync) o.put("sync", true)
             if (offset != 0L) o.put("offset", offset)
             return o
         }
@@ -81,6 +83,7 @@ object Protocol {
                 h.relPath = o.optString("relPath").takeIf { it.isNotEmpty() }
                 h.md5 = o.optString("md5").takeIf { it.isNotEmpty() }
                 h.mtime = o.optLong("mtime", 0)
+                h.sync = o.optBoolean("sync", false)
                 h.offset = o.optLong("offset", 0)
                 return h
             }

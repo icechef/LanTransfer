@@ -1,122 +1,101 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
-    android:layout_height="match_parent"
-    android:orientation="vertical"
-    android:padding="16dp">
-
-    <TextView
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="目录同步（手机 → 电脑）"
-        android:textSize="18sp"
-        android:textStyle="bold" />
-
-    <TextView
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="4dp"
-        android:text="选定手机上的目录，在设备空闲（熄屏充电）时自动增量同步到电脑接收目录下的「同步_设备名」文件夹。"
-        android:textSize="12sp"
-        android:textColor="#666666" />
+    android:layout_height="match_parent">
 
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="16dp"
-        android:orientation="horizontal"
-        android:gravity="center_vertical">
+        android:orientation="vertical"
+        android:padding="16dp">
 
         <TextView
-            android:layout_width="0dp"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:textSize="14sp"
-            android:text="源目录" />
-
-        <Button
-            android:id="@+id/syncPickSourceBtn"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="选择目录" />
-    </LinearLayout>
-
-    <TextView
-        android:id="@+id/syncSourceText"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="4dp"
-        android:text="未选择"
-        android:textSize="13sp"
-        android:textColor="#2563EB" />
-
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="16dp"
-        android:orientation="horizontal"
-        android:gravity="center_vertical">
+            android:text="目录同步（手机 → 电脑）"
+            android:textSize="18sp"
+            android:textStyle="bold" />
 
         <TextView
-            android:layout_width="0dp"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:textSize="14sp"
-            android:text="目标电脑" />
+            android:layout_marginTop="4dp"
+            android:text="选定手机上的多个目录，文件统一保存到电脑同步目录下的「设备名/源目录/…」路径。设备空闲（熄屏充电）时自动同步。"
+            android:textSize="12sp"
+            android:textColor="#666666" />
 
-        <Button
-            android:id="@+id/syncPickTargetBtn"
-            android:layout_width="wrap_content"
+        <LinearLayout
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="选择电脑" />
+            android:layout_marginTop="16dp"
+            android:orientation="horizontal"
+            android:gravity="center_vertical">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:textSize="14sp"
+                android:text="目标电脑" />
+
+            <Button
+                android:id="@+id/syncPickTargetBtn"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="选择电脑" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/syncTargetText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="未选择"
+            android:textSize="13sp"
+            android:textColor="#2563EB" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/syncAddBtn"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="＋ 添加同步文件夹" />
+
+            <Button
+                android:id="@+id/syncAllBtn"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:text="全部同步" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/syncFolderContainer"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:orientation="vertical" />
+
+        <ProgressBar
+            android:id="@+id/syncProgressBar"
+            style="?android:attr/progressBarStyleHorizontal"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:visibility="gone" />
+
+        <TextView
+            android:id="@+id/syncProgressText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:textSize="13sp"
+            android:textColor="#2563EB"
+            android:visibility="gone" />
     </LinearLayout>
-
-    <TextView
-        android:id="@+id/syncTargetText"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="4dp"
-        android:text="未选择"
-        android:textSize="13sp"
-        android:textColor="#2563EB" />
-
-    <Switch
-        android:id="@+id/syncAutoSwitch"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="12dp"
-        android:text="空闲时自动同步（熄屏 + 充电）" />
-
-    <TextView
-        android:id="@+id/syncStatusText"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="16dp"
-        android:text=""
-        android:textSize="14sp"
-        android:textColor="#333333" />
-
-    <ProgressBar
-        android:id="@+id/syncProgressBar"
-        style="?android:attr/progressBarStyleHorizontal"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
-        android:visibility="gone" />
-
-    <TextView
-        android:id="@+id/syncProgressText"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="4dp"
-        android:textSize="13sp"
-        android:textColor="#2563EB"
-        android:visibility="gone" />
-
-    <Button
-        android:id="@+id/syncNowBtn"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="16dp"
-        android:text="立即同步" />
-</LinearLayout>
+</ScrollView>

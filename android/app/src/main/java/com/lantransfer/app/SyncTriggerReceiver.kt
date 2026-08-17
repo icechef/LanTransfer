@@ -10,9 +10,9 @@ import android.os.PowerManager
 // 空闲自动同步触发：熄屏且充电时触发一次目录同步（手机 → 电脑）。
 class SyncTriggerReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        if (!SettingsStore.syncEnabled(context)) return
-        if (SettingsStore.syncTreeUri(context).isEmpty()) return
         if (SettingsStore.syncTarget(context).isBlank()) return
+        val folders = SettingsStore.syncFolders(context).filter { it.enabled }
+        if (folders.isEmpty()) return
 
         // 仅当「熄屏 + 充电」时触发，符合「设备空闲时同步」
         val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
