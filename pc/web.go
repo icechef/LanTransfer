@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -248,6 +249,7 @@ func (s *webServer) handleUpload(w http.ResponseWriter, r *http.Request) {
 	files := r.MultipartForm.File["files"]
 	relpaths := r.MultipartForm.Value["relpaths"]
 	lastModified := r.MultipartForm.Value["lastModified"]
+	log.Printf("[mtime] handleUpload files=%d lastModified=%v", len(files), lastModified)
 	var texts []string
 	if t := r.FormValue("texts"); t != "" {
 		_ = json.Unmarshal([]byte(t), &texts)
@@ -350,6 +352,7 @@ func (s *webServer) handleSend(w http.ResponseWriter, r *http.Request) {
 	files := r.MultipartForm.File["files"]
 	relpaths := r.MultipartForm.Value["relpaths"]
 	lastModified := r.MultipartForm.Value["lastModified"]
+	log.Printf("[mtime] handleSend targets=%q files=%d lastModified=%v", targetsStr, len(files), lastModified)
 	if targetsStr == "" || len(files) == 0 {
 		http.Error(w, "missing targets or files", http.StatusBadRequest)
 		return
@@ -1075,8 +1078,10 @@ func (s *webServer) senderName(sid string) string {
 func applyLastModified(path, msStr string) {
 	ms, err := strconv.ParseInt(strings.TrimSpace(msStr), 10, 64)
 	if err != nil || ms <= 0 {
+		log.Printf("[mtime] applyLastModified skip path=%s msStr=%q err=%v", path, msStr, err)
 		return
 	}
 	t := time.Unix(ms/1000, 0)
 	_ = os.Chtimes(path, t, t)
+	log.Printf("[mtime] applyLastModified ok path=%s -> %s", path, t.Format(time.RFC3339))
 }

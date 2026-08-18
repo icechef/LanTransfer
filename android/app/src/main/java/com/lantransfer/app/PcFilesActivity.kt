@@ -197,19 +197,14 @@ class PcFilesActivity : AppCompatActivity() {
                 }
             } ?: false
             if (ok) {
-                // 先清 IS_PENDING（触发扫描），再单独设 DATE_MODIFIED——放在扫描之后，避免被「接收时间」覆盖
-                contentResolver.update(uri, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null)
-                if (row.mtime > 0) {
-                    contentResolver.update(uri, ContentValues().apply { put(MediaStore.MediaColumns.DATE_MODIFIED, row.mtime) }, null, null)
-                    // 抗 MediaStore 扫描覆盖：部分机型扫描在上方 update 之后异步回写「接收时间」，延迟二次写确保真实 mtime 落盘
-                    val m = row.mtime
-                    val u = uri
-                    android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                        try {
-                            contentResolver.update(u, ContentValues().apply { put(MediaStore.MediaColumns.DATE_MODIFIED, m) }, null, null)
-                        } catch (_: Exception) {}
-                    }, 500)
+                // pending 三明治：清 IS_PENDING + 设 DATE_MODIFIED 同一次 update；
+                // 再文件系统层写入——真正决定文件管理器显示的修改时间（DATE_MODIFIED 列不影响显示）
+                val v = ContentValues().apply {
+                    put(MediaStore.MediaColumns.IS_PENDING, 0)
+                    if (row.mtime > 0) put(MediaStore.MediaColumns.DATE_MODIFIED, row.mtime)
                 }
+                contentResolver.update(uri, v, null, null)
+                if (row.mtime > 0) FileMtimeWriter.applyMtime(this, uri, row.mtime)
                 runOnUiThread { Toast.makeText(this, "接收完成 ${row.name}", Toast.LENGTH_SHORT).show() }
                 postDownloadDone(notifId, row.name, uri)
             } else {

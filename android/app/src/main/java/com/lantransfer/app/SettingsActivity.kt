@@ -1,8 +1,12 @@
 package com.lantransfer.app
 
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.Intent
+import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import android.widget.Button
 import android.widget.EditText
 import android.widget.Switch
@@ -43,6 +47,37 @@ class SettingsActivity : AppCompatActivity() {
             SettingsStore.setSafTreeUri(this, "")
             refreshDirLabel()
             Toast.makeText(this, "已恢复默认下载目录", Toast.LENGTH_SHORT).show()
+        }
+        findViewById<Button>(R.id.mtimeTestBtn).setOnClickListener { runMtimeSelfTest() }
+        findViewById<Button>(R.id.manageStorageBtn).setOnClickListener { requestAllFilesAccess() }
+    }
+
+    // 设备端 mtime 能力自检：在 Downloads 建临时文件、用固定时间戳跑 applyMtime、报告结果。
+    // 让你一次看清本机文件系统写入到底成功与否，不必再靠一轮轮试。
+    private fun runMtimeSelfTest() {
+        Thread {
+            val report = FileMtimeWriter.selfTest(this)
+            runOnUiThread {
+                AlertDialog.Builder(this)
+                    .setTitle("mtime 能力自检")
+                    .setMessage(report)
+                    .setPositiveButton("确定", null)
+                    .show()
+            }
+        }.start()
+    }
+
+    // 兜底：若文件系统写入失败，请求「所有文件访问权限」后重试自检。
+    private fun requestAllFilesAccess() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            try {
+                val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:$packageName"))
+                startActivity(intent)
+            } catch (_: Exception) {
+                Toast.makeText(this, "无法打开授权页", Toast.LENGTH_SHORT).show()
+            }
+        } else {
+            Toast.makeText(this, "Android 11 以下无需此权限", Toast.LENGTH_SHORT).show()
         }
     }
 

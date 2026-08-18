@@ -99,6 +99,20 @@
         android:hint="子文件夹名" />
 
     <Button
+        android:id="@+id/mtimeTestBtn"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="16dp"
+        android:text="mtime 能力自检" />
+
+    <Button
+        android:id="@+id/manageStorageBtn"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:text="请求所有文件访问权限" />
+
+    <Button
         android:id="@+id/saveBtn"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"

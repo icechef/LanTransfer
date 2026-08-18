@@ -33,7 +33,8 @@ object ReceiveStorage {
         fun commit(ctx: Context) {
             if (pending) return
             if (saf) {
-                // SAF 文档没有标准写 mtime 的接口，尽力而为（部分 provider 支持 update）
+                // SAF 文档没有标准写 mtime 的接口，尽力而为（部分 provider 支持 update），
+                // 同时尝试文件系统层写入（SAF 映射为真实路径时有效，决定文件管理器显示）
                 if (mtime > 0) {
                     try {
                         val v = ContentValues().apply {
@@ -41,23 +42,21 @@ object ReceiveStorage {
                         }
                         ctx.contentResolver.update(uri!!, v, null, null)
                     } catch (_: Exception) {}
+                    FileMtimeWriter.applyMtime(ctx, uri, mtime)
                 }
                 return
             }
             try {
-                // 第一步：清 IS_PENDING + 改最终名，触发 MediaStore 扫描
+                // pending 三明治：清 IS_PENDING + 改最终名 + 设 DATE_MODIFIED 同一次 update。
+                // 条目仍 pending 态时 MediaProvider 才允许写 DATE_MODIFIED；拆成两步必被丢弃。
                 val v1 = ContentValues().apply {
                     put(MediaStore.MediaColumns.DISPLAY_NAME, name)
                     put(MediaStore.MediaColumns.IS_PENDING, 0)
+                    if (mtime > 0) put(MediaStore.MediaColumns.DATE_MODIFIED, mtime)
                 }
                 ctx.contentResolver.update(uri!!, v1, null, null)
-                // 第二步：单独设置 DATE_MODIFIED——放在扫描之后，避免被扫描读出的「接收时间」覆盖
-                if (mtime > 0) {
-                    val v2 = ContentValues().apply {
-                        put(MediaStore.MediaColumns.DATE_MODIFIED, mtime)
-                    }
-                    ctx.contentResolver.update(uri!!, v2, null, null)
-                }
+                // 文件系统层写入——真正决定文件管理器显示的修改时间（DATE_MODIFIED 列不影响显示）
+                if (mtime > 0) FileMtimeWriter.applyMtime(ctx, uri, mtime)
             } catch (_: Exception) {}
         }
 
